@@ -2,7 +2,7 @@
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
   "description": "8-slot AI council system with 140+ MCP tools for Windsurf/VS Code. Plug HuggingFace models, semantic memory, GPU orchestration, and self-replicating quine architecture.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "Yufok1",
   "license": "MIT",
   "icon": "resources/icon.png",

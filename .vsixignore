@@ -12,3 +12,6 @@ SETUP.md
 scripts/**
 **/*.ts
 **/*.map
+Gemini_Generated_Image_*
+*.vsix
+.vsixignore
