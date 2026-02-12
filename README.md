@@ -1,125 +1,42 @@
-# Champion Council - AI Model Orchestrator
+# Champion Council
 
-An 8-slot AI model orchestration system with 140+ MCP tools, semantic memory, workflow automation, and a decentralized community marketplace. Built on the OUROBOROS architecture.
+The opposite of a black box. 140+ MCP tools. 8-slot model council. Semantic memory. Workflow engine. Decentralized community. All in one extension.
 
-## Install
+## 7 Tabs
 
-1. Download the latest `.vsix` from [Releases](https://github.com/Yufok1/Ouroboros_extension/releases)
-2. In VS Code or Windsurf: `Extensions` > `...` > `Install from VSIX`
-3. Ensure Python 3.8+ is installed with:
-   ```
-   pip install torch sentence-transformers huggingface-hub mcp fastmcp numpy
-   ```
-4. The MCP server starts automatically. You're done.
+- **Overview** — Architecture diagram, generation stats, quine hash, tool category breakdown
+- **Council** — 8-slot grid. Plug/unplug HuggingFace models. Invoke, clone, mutate, swap.
+- **Memory** — FelixBag semantic vector store. Search, induct, catalog, export.
+- **Activity** — Live feed of every MCP tool call with timing, args, results.
+- **Tools** — Full registry of 140+ tools across 21 categories. Invoke any tool directly.
+- **Diagnostics** — Integrity verification, hash checks, CASCADE lattice, provenance chains.
+- **Community** — Decentralized workflow marketplace and live chat via Nostr protocol.
 
-## What It Does
+## 140+ MCP Tools
 
-### 8-Slot Council System
-Plug up to 8 HuggingFace models into council slots. Each slot is independently invocable for embedding, generation, classification, or deliberation. The council can broadcast, debate, and reach consensus across all plugged models simultaneously.
+Council/Slot Management (10) | FelixBag Memory (10) | HuggingFace Hub (8) | Workflow Automation (9) | Council Operations (7) | Batch Operations (5) | LLM Ops (3) | Diagnostics (6) | CASCADE Observability (7) | Status & Introspection (13) | Export (8) | Replication & Evolution (5) | Vast.AI GPU (13) | Visualization (5) | HOLD Protocol (2) | Security (3) | Cache (2) | Advanced (5)
 
-### 140+ MCP Tools (21 Categories)
-Every tool is exposed via MCP and callable by Windsurf Cascade, VS Code Copilot, or any MCP client:
+Toggle any category on/off: `Ctrl+,` > search "Champion"
 
-- **Council/Slot Management** (10) — plug, unplug, clone, mutate, swap, rename
-- **FelixBag Memory** (10) — semantic vector store with search, induct, catalog
-- **HuggingFace Hub** (8) — search models/datasets, download, plug directly
-- **Workflow Automation** (9) — DAG engine with fan_out, conditionals, tool nodes
-- **Council Operations** (7) — broadcast, debate, chain, consensus
-- **Batch Operations** (5) — parallel inference, embedding, comparison
-- **LLM Operations** (3) — generate, classify, rerank
-- **Diagnostics** (6) — forensic analysis, root cause tracing
-- **CASCADE Observability** (7) — provenance chains, causal graphs, tape recording
-- **Status & Introspection** (13) — integrity verification, hash checks, structure tree
-- **Export & Documentation** (8) — PyTorch, ONNX, quine capsule export
-- **Replication & Evolution** (5) — self-replicating quine, swarm spawning
-- **Vast.AI GPU Rental** (13) — remote GPU search, rent, distribute
-- **Visualization** (5) — Rerun.io integration
-- **HOLD Protocol** (2) — human-in-the-loop decision gates
-- **Security** (3) — threat detection, self-destruct, freeze
-- **Cache Management** (2) — response caching for large results
-- **Advanced** (5) — universal relay, observation, experience feeding
+## Workflow Engine
 
-### Community Tab (NEW in v0.2.0)
-Decentralized workflow marketplace and live chat powered by the Nostr protocol:
-- **Browse & import** workflows published by other users
-- **Publish** your own workflows to the community
-- **Live chat** with other Ouroboros users
-- **Zero infrastructure** — connects to public Nostr relays
-- **Anonymous by default** — identity is a cryptographic keypair stored in your OS keychain
-- **No Discord, no accounts, no management burden**
+DAG execution with 8 node types: `tool`, `fan_out`, `if`, `set`, `merge`, `http`, `input`, `output`. Any MCP tool is a workflow node. Parallel fan-out, conditional branching, auto-wiring.
 
-### Workflow Engine
-A built-in DAG execution engine with 8 node types (`tool`, `fan_out`, `if`, `set`, `merge`, `http`, `input`, `output`). Any of the 140+ tools can be used as a workflow node. Supports parallel fan-out, conditional branching, and auto-wiring.
+## Community Marketplace
 
-## Quick Start
-
-1. **Open the Control Panel** — Click "Champion" in the status bar, or `Ctrl+Shift+P` > "Champion: Open Control Panel"
-2. **Plug a model** — Council tab > PLUG MODEL > enter a HuggingFace model ID
-3. **Search the Hub** — `Ctrl+Shift+P` > "Champion: Search HuggingFace Hub"
-4. **Configure tools** — `Ctrl+,` > search "Champion" > toggle tool categories on/off
-5. **Join the community** — Community tab > chat or browse workflows
+Workflow sharing and live chat via Nostr. No server. No accounts. No Discord. Your identity is a cryptographic keypair stored in your OS keychain. Browse, publish, import, react.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│  Windsurf / VS Code (MCP Client)           │
-│  Cascade calls 140+ MCP tools directly     │
-└─────────────────┬───────────────────────────┘
-                  │ JSON-RPC over HTTP + SSE
-┌─────────────────▼───────────────────────────┐
-│  Champion Extension (TypeScript)            │
-│  WebView panel with 7 tabs                 │
-│  Nostr relay client (community features)   │
-└─────────────────┬───────────────────────────┘
-                  │ Spawns + manages
-┌─────────────────▼───────────────────────────┐
-│  champion_gen8.py (Python MCP Server)       │
-│  8-slot council | FelixBag memory          │
-│  Workflow engine | CASCADE provenance      │
-│  HuggingFace Hub | Vast.AI GPU cluster     │
-└─────────────────────────────────────────────┘
+  IDE (Windsurf / VS Code) ── JSON-RPC over SSE ──> MCP Server
+  Extension WebView (7 tabs) ── postMessage ──> TypeScript backend
+  Nostr relays ── WebSocket ──> Community features
+  champion_gen8.py ── 8-slot council, FelixBag, CASCADE provenance
 ```
 
-## Settings
+## Built on OUROBOROS
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `champion.pythonPath` | `"python"` | Path to Python executable |
-| `champion.mcpPort` | `8765` | MCP server port |
-| `champion.autoStartMCP` | `true` | Auto-start on activation |
-| `champion.maxSlots` | `8` | Council slot count (1-8) |
-| `champion.nostrEnabled` | `true` | Enable community features |
-| `champion.nostrRelays` | `[3 defaults]` | Nostr relay URLs |
-| `champion.tools.*` | varies | Toggle each tool category |
+Gen 8 quine architecture. Sentence-Transformers embedding. DreamerV3 RSSM world model. Scarecrow adapter. Council consensus. CASCADE-LATTICE provenance. Self-replicating. Fully transparent.
 
-## Environment Variables
-
-Optional — create `.env` in the extension directory:
-
-```
-HF_TOKEN=hf_xxxxxxxxxxxxx
-VAST_API_KEY=xxxxxxxxxxxxx
-```
-
-## Troubleshooting
-
-- **Server won't start** — Check `python --version` and `pip list | grep torch`
-- **Tools not showing** — Status bar should show green "CHAMPION". Check tool toggles in settings.
-- **Model won't load** — Try `sentence-transformers/all-MiniLM-L6-v2` first. Set `HF_TOKEN` for gated models.
-
-## License
-
-MIT
-
-## Credits
-
-Built on the **OUROBOROS architecture** by [Yufok1](https://github.com/Yufok1):
-- Sentence-Transformers embedding foundation
-- DreamerV3 RSSM world model
-- Scarecrow universal adapter
-- Council multi-agent consensus
-- CASCADE-LATTICE cryptographic provenance
-- Nostr decentralized community protocol
-
-Quine-capable, self-replicating, fully transparent AI system.
+By [Yufok1](https://github.com/Yufok1) | MIT

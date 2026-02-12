@@ -8,3 +8,15 @@ __pycache__
 *.pyc
 .mcp_server.log
 Gemini_Generated_Image_*.png
+
+# Source code — not for public GitHub
+src/
+media/
+scripts/
+champion_gen8.py
+tsconfig.json
+package-lock.json
+.eslintrc.json
+.vscodeignore
+.vsixignore
+SETUP.md
