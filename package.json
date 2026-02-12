@@ -2,7 +2,7 @@
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
   "description": "8-slot AI council system with 140+ MCP tools for Windsurf/VS Code. Plug HuggingFace models, semantic memory, GPU orchestration, and self-replicating quine architecture.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "Yufok1",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -242,6 +242,23 @@
           "default": true,
           "markdownDescription": "**Cache Management** (2 tools)\n- `get_cached` - Retrieve cached large response by ID\n- `clear_cache` - Clear response cache to free memory",
           "order": 30
+        },
+        "champion.nostrEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Nostr-based community features (workflow marketplace, live chat)",
+          "order": 40
+        },
+        "champion.nostrRelays": {
+          "type": "array",
+          "default": [
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.nostr.band"
+          ],
+          "items": { "type": "string" },
+          "description": "Nostr relay WebSocket URLs for community features",
+          "order": 41
         }
       }
     }
@@ -257,10 +274,16 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
     "eslint": "^8.54.0",
     "typescript": "^5.3.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@noble/hashes": "^2.0.1",
+    "@noble/secp256k1": "^3.0.0",
+    "nostr-tools": "^2.23.1",
+    "ws": "^8.19.0"
+  }
 }

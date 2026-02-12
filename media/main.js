@@ -32,6 +32,18 @@
                 case 'toolResult':
                     handleToolResult(msg);
                     break;
+                case 'nostrEvent':
+                    handleNostrEvent(msg.event);
+                    break;
+                case 'nostrIdentity':
+                    handleNostrIdentity(msg);
+                    break;
+                case 'nostrError':
+                    console.error('[Nostr]', msg.error);
+                    break;
+                case 'nostrWorkflowPublished':
+                    if (msg.event) handleNostrEvent(msg.event);
+                    break;
             }
         } catch (err) {
             console.error('[Webview] Error handling message:', msg.type, err);
@@ -400,10 +412,189 @@
     }
     window.clearActivity = clearActivity;
 
+    // ── COMMUNITY / NOSTR ──
+    var _chatMessages = [];
+    var _workflowEvents = [];
+    var _nostrPubkey = '';
+
+    // Handle Nostr messages from extension backend
+    function handleNostrEvent(event) {
+        if (!event) return;
+        // kind 1 = chat, kind 30078 = workflow
+        if (event.kind === 1) {
+            // Deduplicate
+            if (_chatMessages.some(function (m) { return m.id === event.id; })) return;
+            _chatMessages.push(event);
+            _chatMessages.sort(function (a, b) { return a.created_at - b.created_at; });
+            if (_chatMessages.length > 200) _chatMessages = _chatMessages.slice(-200);
+            renderChatFeed();
+        } else if (event.kind === 30078) {
+            if (_workflowEvents.some(function (w) { return w.id === event.id; })) return;
+            _workflowEvents.push(event);
+            _workflowEvents.sort(function (a, b) { return b.created_at - a.created_at; });
+            renderWorkflowFeed();
+        }
+    }
+
+    function handleNostrIdentity(msg) {
+        _nostrPubkey = msg.pubkey || '';
+        var dot = document.getElementById('nostr-dot');
+        var npub = document.getElementById('nostr-npub');
+        var relays = document.getElementById('nostr-relays');
+        if (dot) dot.className = 'dot ' + (msg.connected ? 'green pulse' : 'off');
+        if (npub) npub.textContent = msg.npub || 'Not initialized';
+        if (relays) relays.textContent = (msg.relayCount || 0) + ' relay' + ((msg.relayCount || 0) !== 1 ? 's' : '');
+    }
+
+    function renderChatFeed() {
+        var feed = document.getElementById('nostr-chat-feed');
+        if (!feed) return;
+        if (_chatMessages.length === 0) {
+            feed.innerHTML = '<div class="community-msg" style="color:var(--text-dim);text-align:center;padding:20px;">No messages yet. Be the first!</div>';
+            return;
+        }
+        var recent = _chatMessages.slice(-50);
+        feed.innerHTML = recent.map(function (ev) {
+            var ts = new Date(ev.created_at * 1000).toLocaleTimeString();
+            var author = ev.pubkey.slice(0, 8) + '...' + ev.pubkey.slice(-4);
+            var isSelf = ev.pubkey === _nostrPubkey;
+            var safeContent = (ev.content || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return '<div class="community-msg">' +
+                '<span class="msg-author" style="' + (isSelf ? 'color:var(--accent);' : '') + '">' + author + '</span>' +
+                '<span class="msg-time">' + ts + '</span>' +
+                '<div class="msg-text">' + safeContent + '</div>' +
+                '</div>';
+        }).join('');
+        feed.scrollTop = feed.scrollHeight;
+    }
+
+    function renderWorkflowFeed() {
+        var feed = document.getElementById('nostr-wf-feed');
+        if (!feed) return;
+        if (_workflowEvents.length === 0) {
+            feed.innerHTML = '<div class="wf-card" style="color:var(--text-dim);text-align:center;padding:20px;">No workflows published yet.</div>';
+            return;
+        }
+        feed.innerHTML = _workflowEvents.map(function (ev) {
+            var content = {};
+            try { content = JSON.parse(ev.content); } catch (e) { content = { name: 'Unknown', description: ev.content }; }
+            var author = ev.pubkey.slice(0, 8) + '...' + ev.pubkey.slice(-4);
+            var ts = new Date(ev.created_at * 1000).toLocaleDateString();
+            var tags = (ev.tags || []).filter(function (t) { return t[0] === 't' && t[1] !== 'ouroboros' && t[1] !== 'ouroboros-workflow'; }).map(function (t) { return t[1]; });
+            var safeDesc = ((content.description || '') + '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            var safeName = ((content.name || 'Untitled') + '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return '<div class="wf-card">' +
+                '<div class="wf-title">' + safeName + '</div>' +
+                '<div class="wf-author">by ' + author + ' &middot; ' + ts + '</div>' +
+                '<div class="wf-desc">' + safeDesc + '</div>' +
+                (tags.length > 0 ? '<div class="wf-tags">' + tags.map(function (t) { return '<span>' + t + '</span>'; }).join('') + '</div>' : '') +
+                '<div class="wf-actions">' +
+                '<button class="btn-dim" data-wf-import=\'' + (ev.content || '').replace(/'/g, '&#39;') + '\'>IMPORT</button>' +
+                '<button class="btn-dim" data-wf-react="' + ev.id + '" data-wf-pubkey="' + ev.pubkey + '">ZAP</button>' +
+                '</div>' +
+                '</div>';
+        }).join('');
+    }
+
+    // Community event listeners
+    var chatSendBtn = document.getElementById('nostr-chat-send');
+    if (chatSendBtn) {
+        chatSendBtn.addEventListener('click', function () {
+            var input = document.getElementById('nostr-chat-input');
+            if (input && input.value.trim()) {
+                vscode.postMessage({ command: 'nostrPublishChat', message: input.value.trim() });
+                input.value = '';
+            }
+        });
+    }
+    var chatInput = document.getElementById('nostr-chat-input');
+    if (chatInput) {
+        chatInput.addEventListener('keyup', function (e) {
+            if (e.key === 'Enter') {
+                var btn = document.getElementById('nostr-chat-send');
+                if (btn) btn.click();
+            }
+        });
+    }
+
+    var fetchWfBtn = document.getElementById('nostr-fetch-wf');
+    if (fetchWfBtn) {
+        fetchWfBtn.addEventListener('click', function () {
+            vscode.postMessage({ command: 'nostrFetchWorkflows' });
+        });
+    }
+    var fetchChatBtn = document.getElementById('nostr-fetch-chat');
+    if (fetchChatBtn) {
+        fetchChatBtn.addEventListener('click', function () {
+            vscode.postMessage({ command: 'nostrFetchChat' });
+        });
+    }
+    var publishWfBtn = document.getElementById('nostr-publish-wf');
+    if (publishWfBtn) {
+        publishWfBtn.addEventListener('click', function () {
+            var el = document.getElementById('publish-wf-modal');
+            if (el) el.classList.add('active');
+        });
+    }
+
+    // Workflow feed event delegation (import + react)
+    var wfFeed = document.getElementById('nostr-wf-feed');
+    if (wfFeed) {
+        wfFeed.addEventListener('click', function (e) {
+            var importBtn = e.target.closest('[data-wf-import]');
+            if (importBtn) {
+                try {
+                    var wfData = JSON.parse(importBtn.dataset.wfImport);
+                    if (wfData.workflow) {
+                        callTool('workflow_create', { definition: wfData.workflow });
+                    }
+                } catch (err) {
+                    console.error('[Community] Import failed:', err);
+                }
+                return;
+            }
+            var reactBtn = e.target.closest('[data-wf-react]');
+            if (reactBtn) {
+                vscode.postMessage({
+                    command: 'nostrReact',
+                    eventId: reactBtn.dataset.wfReact,
+                    eventPubkey: reactBtn.dataset.wfPubkey,
+                    reaction: '+'
+                });
+            }
+        });
+    }
+
+    function doPublishWorkflow() {
+        var name = document.getElementById('pub-wf-name').value;
+        var desc = document.getElementById('pub-wf-desc').value;
+        var json = document.getElementById('pub-wf-json').value;
+        var tagsStr = document.getElementById('pub-wf-tags').value;
+        if (!name || !json) return;
+        var tags = tagsStr ? tagsStr.split(',').map(function (t) { return t.trim(); }).filter(Boolean) : [];
+        vscode.postMessage({
+            command: 'nostrPublishWorkflow',
+            name: name,
+            description: desc,
+            workflow: json,
+            tags: tags
+        });
+        closeModals();
+    }
+    window.doPublishWorkflow = doPublishWorkflow;
+
     // ── INIT ──
     buildToolsRegistry();
     renderSlots([]);
 
     // Tell extension we're ready
     vscode.postMessage({ command: 'ready' });
+
+    // Request Nostr identity on load
+    vscode.postMessage({ command: 'nostrGetIdentity' });
+    // Auto-fetch community content
+    setTimeout(function () {
+        vscode.postMessage({ command: 'nostrFetchWorkflows' });
+        vscode.postMessage({ command: 'nostrFetchChat' });
+    }, 2000);
 })();

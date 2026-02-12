@@ -1,15 +1,19 @@
 import * as vscode from 'vscode';
 import { MCPServerManager, TOOL_CATEGORIES, ToolCallEvent } from '../mcpServer';
+import { NostrService, NostrEvent } from '../nostrService';
 
 export class CouncilPanel {
     private panel: vscode.WebviewPanel | undefined;
     private disposables: vscode.Disposable[] = [];
     private activityLog: ToolCallEvent[] = [];
 
+    private nostrDisposable: vscode.Disposable | undefined;
+
     constructor(
         private extensionUri: vscode.Uri,
         private mcp: MCPServerManager,
-        private context: vscode.ExtensionContext
+        private context: vscode.ExtensionContext,
+        private nostr?: NostrService
     ) {
         // Capture activity events
         this.mcp.onActivity((event) => {
@@ -25,6 +29,13 @@ export class CouncilPanel {
             console.log('[Panel] Status changed to:', status);
             this.pushFullState();
         });
+
+        // Forward Nostr events to webview
+        if (this.nostr) {
+            this.nostrDisposable = this.nostr.onEvent((event: NostrEvent) => {
+                this.send({ type: 'nostrEvent', event });
+            });
+        }
     }
 
     show() {
@@ -124,6 +135,64 @@ export class CouncilPanel {
             case 'openSettings':
                 vscode.commands.executeCommand('workbench.action.openSettings', 'champion');
                 break;
+            // ── NOSTR COMMANDS ──
+            case 'nostrGetIdentity': {
+                if (this.nostr) {
+                    this.send({
+                        type: 'nostrIdentity',
+                        pubkey: this.nostr.getPublicKey(),
+                        npub: this.nostr.getNpub(),
+                        connected: this.nostr.connected,
+                        relayCount: this.nostr.relayCount,
+                        relays: this.nostr.getConnectedRelays()
+                    });
+                }
+                break;
+            }
+            case 'nostrPublishChat': {
+                if (this.nostr && msg.message) {
+                    try {
+                        await this.nostr.publishChat(msg.message);
+                    } catch (err: any) {
+                        this.send({ type: 'nostrError', error: err.message });
+                    }
+                }
+                break;
+            }
+            case 'nostrPublishWorkflow': {
+                if (this.nostr && msg.name && msg.workflow) {
+                    try {
+                        const event = await this.nostr.publishWorkflow(
+                            msg.name,
+                            msg.description || '',
+                            msg.workflow,
+                            msg.tags || []
+                        );
+                        this.send({ type: 'nostrWorkflowPublished', event });
+                    } catch (err: any) {
+                        this.send({ type: 'nostrError', error: err.message });
+                    }
+                }
+                break;
+            }
+            case 'nostrFetchWorkflows': {
+                if (this.nostr) { this.nostr.fetchWorkflows(); }
+                break;
+            }
+            case 'nostrFetchChat': {
+                if (this.nostr) { this.nostr.fetchChat(msg.since); }
+                break;
+            }
+            case 'nostrReact': {
+                if (this.nostr && msg.eventId && msg.eventPubkey) {
+                    try {
+                        await this.nostr.reactToEvent(msg.eventId, msg.eventPubkey, msg.reaction || '+');
+                    } catch (err: any) {
+                        this.send({ type: 'nostrError', error: err.message });
+                    }
+                }
+                break;
+            }
         }
     }
 
@@ -589,6 +658,131 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     margin-bottom: 12px;
     font-weight: 600;
 }
+
+/* ── COMMUNITY TAB ── */
+.nostr-identity {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    margin-bottom: 16px;
+    font-size: 11px;
+}
+.nostr-identity .npub {
+    font-family: var(--mono);
+    color: var(--accent);
+    font-size: 10px;
+}
+.nostr-identity .relay-count {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 10px;
+}
+.community-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    min-height: 400px;
+}
+.community-panel {
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+}
+.community-panel-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.community-feed {
+    flex: 1;
+    overflow-y: auto;
+    max-height: 350px;
+    padding: 0;
+}
+.community-msg {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+}
+.community-msg:hover { background: var(--surface2); }
+.community-msg .msg-author {
+    color: var(--blue);
+    font-weight: 600;
+    font-size: 10px;
+}
+.community-msg .msg-time {
+    color: var(--text-dim);
+    font-size: 9px;
+    margin-left: 8px;
+}
+.community-msg .msg-text {
+    margin-top: 4px;
+    line-height: 1.4;
+}
+.community-msg .msg-actions {
+    margin-top: 4px;
+    display: flex;
+    gap: 8px;
+}
+.community-msg .msg-actions button {
+    font-size: 9px;
+    padding: 2px 6px;
+}
+.chat-input-row {
+    display: flex;
+    gap: 4px;
+    padding: 8px;
+    border-top: 1px solid var(--border);
+}
+.chat-input-row input {
+    flex: 1;
+}
+.wf-card {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+}
+.wf-card:hover { background: var(--surface2); }
+.wf-card .wf-title {
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--accent);
+}
+.wf-card .wf-author {
+    font-size: 9px;
+    color: var(--text-dim);
+}
+.wf-card .wf-desc {
+    font-size: 10px;
+    color: var(--text);
+    margin-top: 4px;
+}
+.wf-card .wf-tags {
+    margin-top: 4px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+.wf-card .wf-tags span {
+    font-size: 9px;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+}
+.wf-card .wf-actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 6px;
+}
 </style>
 </head>
 <body>
@@ -612,6 +806,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <button class="tab" data-tab="activity">Activity</button>
     <button class="tab" data-tab="tools">Tools</button>
     <button class="tab" data-tab="diagnostics">Diagnostics</button>
+    <button class="tab" data-tab="community">Community</button>
 </div>
 
 <!-- ═══════════════ OVERVIEW TAB ═══════════════ -->
@@ -767,6 +962,77 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <div class="diag-section">
         <div class="diag-title">OUTPUT</div>
         <div class="diag-output" id="diag-output">Run a diagnostic command above.</div>
+    </div>
+</div>
+
+<!-- ═══════════════ COMMUNITY TAB ═══════════════ -->
+<div class="content" id="tab-community">
+    <div class="section-head">OUROBOROS COMMUNITY</div>
+    <div class="nostr-identity" id="nostr-identity">
+        <span class="dot off" id="nostr-dot"></span>
+        <span>IDENTITY:</span>
+        <span class="npub" id="nostr-npub">Initializing...</span>
+        <span class="relay-count" id="nostr-relays">0 relays</span>
+    </div>
+    <div class="community-split">
+        <!-- WORKFLOW MARKETPLACE -->
+        <div class="community-panel">
+            <div class="community-panel-header">
+                <span>WORKFLOW MARKETPLACE</span>
+                <div style="display:flex;gap:4px;">
+                    <button class="btn-dim" id="nostr-fetch-wf">REFRESH</button>
+                    <button id="nostr-publish-wf">PUBLISH</button>
+                </div>
+            </div>
+            <div class="community-feed" id="nostr-wf-feed">
+                <div class="wf-card" style="color:var(--text-dim);text-align:center;padding:20px;">
+                    Connect to relays to browse workflows...
+                </div>
+            </div>
+        </div>
+        <!-- LIVE CHAT -->
+        <div class="community-panel">
+            <div class="community-panel-header">
+                <span>LIVE CHAT</span>
+                <button class="btn-dim" id="nostr-fetch-chat">REFRESH</button>
+            </div>
+            <div class="community-feed" id="nostr-chat-feed">
+                <div class="community-msg" style="color:var(--text-dim);text-align:center;padding:20px;">
+                    Connect to relays to join chat...
+                </div>
+            </div>
+            <div class="chat-input-row">
+                <input id="nostr-chat-input" placeholder="Type a message..." />
+                <button id="nostr-chat-send">SEND</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ PUBLISH WORKFLOW MODAL ═══════════════ -->
+<div class="modal-overlay" id="publish-wf-modal">
+    <div class="modal">
+        <div class="modal-title">PUBLISH WORKFLOW TO COMMUNITY</div>
+        <div class="field">
+            <label>Workflow Name</label>
+            <input id="pub-wf-name" placeholder="My Awesome Workflow" />
+        </div>
+        <div class="field">
+            <label>Description</label>
+            <input id="pub-wf-desc" placeholder="What does this workflow do?" />
+        </div>
+        <div class="field">
+            <label>Workflow JSON</label>
+            <input id="pub-wf-json" placeholder='{"id":"my-wf","nodes":[...],"connections":[...]}' />
+        </div>
+        <div class="field">
+            <label>Tags (comma-separated)</label>
+            <input id="pub-wf-tags" placeholder="embedding, search, automation" />
+        </div>
+        <div class="modal-actions">
+            <button onclick="doPublishWorkflow()">PUBLISH</button>
+            <button class="btn-dim" onclick="closeModals()">CANCEL</button>
+        </div>
     </div>
 </div>
 

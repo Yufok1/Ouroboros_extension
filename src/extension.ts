@@ -1,12 +1,31 @@
 import * as vscode from 'vscode';
 import { MCPServerManager } from './mcpServer';
 import { CouncilPanel } from './webview/panel';
+import { NostrService } from './nostrService';
 
 let mcpManager: MCPServerManager;
 let councilPanel: CouncilPanel | undefined;
+let nostrService: NostrService;
 
 export function activate(context: vscode.ExtensionContext) {
     mcpManager = new MCPServerManager(context);
+    nostrService = new NostrService(context);
+
+    // Auto-init Nostr (keypair from SecretStorage)
+    const nostrConfig = vscode.workspace.getConfiguration('champion');
+    const relayUrls: string[] = nostrConfig.get('nostrRelays', [
+        'wss://relay.damus.io',
+        'wss://nos.lol',
+        'wss://relay.nostr.band'
+    ]);
+    if (nostrConfig.get('nostrEnabled', true)) {
+        nostrService.init().then((pubkey) => {
+            console.log('[Nostr] Identity:', pubkey.slice(0, 16) + '...');
+            nostrService.connectToRelays(relayUrls).catch(() => {});
+        }).catch((err) => {
+            console.warn('[Nostr] Init failed:', err.message);
+        });
+    }
 
     // Auto-start MCP server
     const config = vscode.workspace.getConfiguration('champion');
@@ -26,7 +45,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('champion.showPanel', () => {
             if (!councilPanel) {
-                councilPanel = new CouncilPanel(context.extensionUri, mcpManager, context);
+                councilPanel = new CouncilPanel(context.extensionUri, mcpManager, context, nostrService);
             }
             councilPanel.show();
         })
@@ -231,5 +250,8 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
     if (mcpManager) {
         mcpManager.stop();
+    }
+    if (nostrService) {
+        nostrService.dispose();
     }
 }
