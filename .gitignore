@@ -1,0 +1,10 @@
+node_modules
+out
+.vscode-test/
+*.vsix
+.vscode
+.env
+__pycache__
+*.pyc
+.mcp_server.log
+Gemini_Generated_Image_*.png

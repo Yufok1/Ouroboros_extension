@@ -1,0 +1,14 @@
+.vscode/**
+.vscode-test/**
+src/**
+node_modules/**
+.gitignore
+.env
+__pycache__/**
+*.pyc
+.mcp_server.log
+tsconfig.json
+SETUP.md
+scripts/**
+**/*.ts
+**/*.map
