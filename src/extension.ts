@@ -205,15 +205,24 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider('championPanel', {
             resolveWebviewView(webviewView: vscode.WebviewView) {
                 webviewView.webview.options = { enableScripts: true };
-                webviewView.webview.html = `
-                    <body style="padding:16px;font-family:var(--vscode-font-family);color:var(--vscode-foreground);">
+                webviewView.webview.html = `<!DOCTYPE html>
+                    <html><body style="padding:16px;font-family:var(--vscode-font-family);color:var(--vscode-foreground);">
                         <p style="text-transform:uppercase;letter-spacing:2px;font-size:11px;opacity:0.6;">Champion Council</p>
-                        <p style="margin-top:8px;">
-                            <a href="command:champion.showPanel" style="color:var(--vscode-textLink-foreground);">
-                                Open Full Control Panel
-                            </a>
-                        </p>
-                    </body>`;
+                        <button id="openBtn" style="margin-top:8px;padding:8px 16px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;cursor:pointer;font-size:13px;width:100%;">
+                            Open Full Control Panel
+                        </button>
+                        <script>
+                            const vscode = acquireVsCodeApi();
+                            document.getElementById('openBtn').addEventListener('click', () => {
+                                vscode.postMessage({ command: 'openPanel' });
+                            });
+                        </script>
+                    </body></html>`;
+                webviewView.webview.onDidReceiveMessage((msg) => {
+                    if (msg.command === 'openPanel') {
+                        vscode.commands.executeCommand('champion.showPanel');
+                    }
+                });
             }
         })
     );
