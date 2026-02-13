@@ -2,6 +2,17 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.3.7] - 2026-02-13
+- **Fixed**: Diagnostics compact view now dynamically extracts ALL fields from tool responses instead of a hardcoded subset that missed most data.
+- **Fixed**: Nested tool response objects (weights, params, config, adapter shapes) are flattened and displayed in the KV grid.
+- **Improved**: Small arrays (e.g. tensor shapes) now show actual values instead of "[N items]".
+- **Improved**: Source/fallback provenance shown in diagnostic header metadata.
+
+## [0.3.6] - 2026-02-13
+- **Fixed**: Diagnostics tab now routes every diagnostics action through robust fallback orchestration (tool + fallback tools + MCP resources).
+- **Fixed**: Dead-zone outputs in diagnostics (null/unknown/error-only states) are now normalized and enriched with available runtime data.
+- **Improved**: Diagnostics output UI now shows compact health/fallback/probe summaries with expandable resolved payload and probe trace sections.
+
 ## [0.3.5] - 2026-02-13
 - **Fixed**: Memory tab Export now opens a format picker instead of routing to unrelated UI behavior.
 - **Added**: Memory export formats for JSON, Markdown, TXT, and CSV.

@@ -2,7 +2,7 @@
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
   "description": "Local AI model orchestrator with 140+ MCP tools. Manage HuggingFace models, semantic memory, workflows, and developer collaboration.",
-  "version": "0.3.5",
+  "version": "0.3.7",
   "galleryBanner": {
     "color": "#1a1a2e",
     "theme": "dark"
@@ -94,7 +94,8 @@
         {
           "type": "webview",
           "id": "championPanel",
-          "name": "Control Panel"
+          "name": "Control Panel",
+          "icon": "resources/icon.svg"
         }
       ]
     },
