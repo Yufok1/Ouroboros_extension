@@ -1,9 +1,25 @@
 {
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
-  "description": "8-slot AI council system with 140+ MCP tools for Windsurf/VS Code. Plug HuggingFace models, semantic memory, GPU orchestration, and self-replicating quine architecture.",
-  "version": "0.2.0",
-  "publisher": "Yufok1",
+  "description": "Local AI model orchestrator with 140+ MCP tools. Manage HuggingFace models, semantic memory, workflows, and developer collaboration.",
+  "version": "0.3.0",
+  "galleryBanner": {
+    "color": "#1a1a2e",
+    "theme": "dark"
+  },
+  "keywords": [
+    "ai",
+    "mcp",
+    "huggingface",
+    "model",
+    "council",
+    "orchestrator",
+    "workflow",
+    "nostr",
+    "rag",
+    "memory"
+  ],
+  "publisher": "Ouroboros",
   "license": "MIT",
   "icon": "resources/icon.png",
   "repository": {
@@ -120,127 +136,127 @@
         "champion.tools.coreInference": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Core Inference** (5 tools)\n- `forward` - Run inference through quine brain\n- `infer` - Alternative inference interface\n- `embed_text` - Generate semantic embeddings (384-dim)\n- `deliberate` - Slow-thinking reasoning with world model\n- `imagine` - World model simulation (predict consequences)",
+          "description": "Enable core inference tools (5 tools: forward, infer, embed, deliberate, imagine)",
           "order": 10
         },
         "champion.tools.chat": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Chat & Conversation** (3 tools)\n- `chat` - Multi-turn conversation (context maintained)\n- `chat_reset` - Clear conversation history\n- `chat_history` - Get full conversation log",
+          "description": "Enable chat and conversation tools (3 tools)",
           "order": 11
         },
         "champion.tools.batch": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Batch Operations** (5 tools)\n- `batch_forward` - Batch inference (parallel processing)\n- `batch_embed` - Batch embedding generation\n- `pipe` - Chain multiple operations sequentially\n- `compare` - Compare outputs across multiple slots\n- `invoke_slot` - Directly invoke specific council slot",
+          "description": "Enable batch processing tools (5 tools: batch forward, embed, pipe, compare)",
           "order": 12
         },
         "champion.tools.councilSlots": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Council/Slot Management** (12 tools)\n- `plug_model` - Plug HuggingFace model into slot\n- `unplug_slot` - Remove model from slot\n- `list_slots` - Show all slots and their models\n- `clone_slot` - Duplicate a slot configuration\n- `mutate_slot` - Apply random mutations to slot\n- `rename_slot` - Change slot display name\n- `swap_slots` - Exchange two slot positions\n- `slot_info` - Detailed info for specific slot\n- `get_slot_params` - Get slot parameter counts\n- `hub_plug` - Direct HuggingFace to slot integration\n- `cull_slot` - Remove clones from a slot\n- `load_manifest` - Load slot configuration from manifest",
+          "description": "Enable council slot management tools (12 tools: plug, unplug, list, rename, swap)",
           "order": 13
         },
         "champion.tools.council": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Council Operations** (7 tools)\n- `broadcast` - Send message to all slots\n- `council_broadcast` - Broadcast with consensus tracking\n- `council_status` - Get council consensus state\n- `set_consensus` - Set voting method (majority/bayesian/etc)\n- `debate` - Multi-round debate between slots\n- `chain` - Sequential slot processing\n- `all_slots` - Parallel inference across all slots",
+          "description": "Enable council operation tools (7 tools: broadcast, consensus, debate, chain)",
           "order": 14
         },
         "champion.tools.felixbag": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**FelixBag Memory** (12 tools)\n- `bag_get` - Retrieve item by key\n- `bag_put` - Store item with key\n- `bag_search` - Semantic search (vector similarity)\n- `bag_catalog` - List all stored items\n- `bag_induct` - Store with automatic embedding\n- `bag_forget` - Delete item by key\n- `bag_export` - Export entire bag to JSON\n- `pocket` - Quick-store with auto-key generation\n- `summon` - Semantic retrieval (top-k results)\n- `materialize` - Export item to filesystem\n- `load_bag` - Load items from bag file into FelixBag\n- `save_bag` - Save FelixBag contents to file",
+          "description": "Enable semantic memory tools (12 tools: get, put, search, catalog, export)",
           "order": 15
         },
         "champion.tools.huggingface": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**HuggingFace Hub** (8 tools)\n- `hub_search` - Search models by query\n- `hub_search_datasets` - Search datasets by query\n- `hub_top` - Get top models by task\n- `hub_info` - Model metadata and specs\n- `hub_download` - Download model to cache\n- `hub_tasks` - List available task categories\n- `hub_count` - Count models by task\n- `capture_model` - Capture model architecture to bag",
+          "description": "Enable HuggingFace Hub tools (8 tools: search, info, download, browse)",
           "order": 16
         },
         "champion.tools.llm": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**LLM Operations** (3 tools)\n- `generate` - Generate text with LLM\n- `classify` - Classify text into categories\n- `rerank` - Rerank documents by relevance",
+          "description": "Enable LLM operation tools (3 tools: generate, classify, rerank)",
           "order": 17
         },
         "champion.tools.vastai": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**Vast.AI GPU Rental** (13 tools) - Requires VAST_API_KEY\n- `vast_search` - Search available GPU offers\n- `vast_details` - Get full specs for offer\n- `vast_rent` - Rent GPU instance\n- `vast_instances` - List your active rentals\n- `vast_stop` - Stop and destroy instance\n- `vast_connect` - Route inference to GPU\n- `vast_ready` - Check if instance is ready\n- `vast_run` - Execute code on remote GPU\n- `vast_load_model` - Load model on remote GPU\n- `vast_generate` - Generate text on remote GPU\n- `vast_embed` - Generate embeddings on remote GPU\n- `vast_broadcast` - Send command to ALL GPUs\n- `vast_distribute` - Send different commands to specific GPUs",
+          "description": "Enable Vast.AI GPU rental tools (13 tools, requires VAST_API_KEY)",
           "order": 18
         },
         "champion.tools.replication": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Replication & Evolution** (5 tools)\n- `replicate` - Create self-replicating clone\n- `spawn_swarm` - Create population of variants\n- `spawn_quine` - Generate quine with observation\n- `export_quine` - Export as quine capsule\n- `import_brain` - Load brain from file",
+          "description": "Enable model snapshot and variant tools (5 tools)",
           "order": 19
         },
         "champion.tools.export": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Export & Documentation** (8 tools)\n- `export_config` - Export evolution configuration\n- `export_docs` - Export all documentation artifacts\n- `export_interface` - Generate API interface files\n- `export_pt` - Export as PyTorch .pt file\n- `export_onnx` - Export as ONNX model\n- `get_readme` - Get embedded README\n- `get_artifacts` - List all embedded artifacts\n- `save_state` - Save current state to disk",
+          "description": "Enable export and documentation tools (8 tools: config, docs, PyTorch, ONNX)",
           "order": 20
         },
         "champion.tools.visualization": {
           "type": "boolean",
-          "default": false,
-          "markdownDescription": "**Visualization** (5 tools) - Requires rerun-sdk\n- `start_rerun_viewer` - Launch Rerun.io visualizer\n- `log_to_rerun` - Log data to Rerun stream\n- `rerun_log_inference` - Log inference step visualization\n- `rerun_log_evolution` - Log evolution metrics\n- `spawn_tui` - Spawn embedded TUI for visualization",
+          "default": true,
+          "description": "Enable visualization tools (5 tools, requires rerun-sdk)",
           "order": 21
         },
         "champion.tools.status": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Status & Introspection** (20 tools)\n- `get_status` - Quick capsule status summary\n- `get_capabilities` - List all available capabilities\n- `get_identity` - Get capsule identity info\n- `get_genesis` - Get creation/birth metadata\n- `get_provenance` - Full merkle-linked lineage chain\n- `verify_integrity` - Verify merkle hash consistency\n- `verify_hash` - Check quine hash matches\n- `tree` - Display capsule structure tree\n- `show_weights` - Show weight statistics\n- `show_dims` - Show layer dimensions\n- `show_rssm` - Show RSSM architecture (Dreamer)\n- `show_lora` - Show LoRA adapter details\n- `demo` - Run demonstration sequence\n- `get_help` - Comprehensive help with all tools\n- `get_about` - Get capsule info\n- `get_onboarding` - Complete onboarding guide\n- `get_quickstart` - Quickstart guide\n- `list_models` - List popular pluggable models\n- `heartbeat` - Lightweight alive check\n- `get_embedder_info` - Current embedder details",
+          "description": "Enable status and introspection tools (20 tools: status, capabilities, weights, dims)",
           "order": 22
         },
         "champion.tools.diagnostics": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Diagnostics** (6 tools)\n- `diagnose_file` - Analyze file for issues\n- `diagnose_directory` - Scan directory for problems\n- `symbiotic_interpret` - Interpret signals symbiotically\n- `trace_root_causes` - Trace problem to root cause\n- `forensics_analyze` - Forensic analysis of data\n- `metrics_analyze` - Analyze performance metrics",
+          "description": "Enable diagnostic tools (6 tools: file analysis, root cause tracing, metrics)",
           "order": 23
         },
         "champion.tools.apiServer": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**API & Server** (6 tools)\n- `start_api_server` - Start HTTP API server\n- `orchestra` - Orchestrate multi-agent workflow\n- `relay_status` - Get relay system status\n- `relay_send` - Send command via relay\n- `spawn_tui` - Spawn embedded TUI subprocess\n- `toggle_relay` - Toggle relay listening mode",
+          "description": "Enable API server and relay tools (6 tools)",
           "order": 24
         },
         "champion.tools.hold": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**HOLD Protocol** (Human-in-Loop) (2 tools)\n- `hold_yield` - Yield decision to human operator\n- `hold_resolve` - Resolve held decision",
+          "description": "Enable human-in-the-loop decision tools (2 tools)",
           "order": 25
         },
         "champion.tools.security": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "**Security** (3 tools)\n- `implode` - Self-destruct on threat detection\n- `defrost` - Unfreeze after implode (requires auth)\n- `is_frozen` - Check if capsule is frozen",
+          "description": "Enable safety state management tools (3 tools: freeze, resume, check)",
           "order": 26
         },
         "champion.tools.workflows": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Workflow Automation** (9 tools)\n- `workflow_test` - Verify workflow engine is operational\n- `workflow_execute` - Execute a workflow by ID\n- `workflow_list` - List all saved workflows\n- `workflow_create` - Create new workflow from JSON\n- `workflow_get` - Get workflow definition\n- `workflow_update` - Update existing workflow\n- `workflow_delete` - Delete a workflow\n- `workflow_history` - Get execution history\n- `workflow_status` - Check execution status",
+          "description": "Enable workflow automation tools (9 tools: create, execute, list, history)",
           "order": 27
         },
         "champion.tools.advanced": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Advanced** (5 tools)\n- `call` - Universal tool relay (call any tool by name)\n- `observe` - Record observation for learning\n- `feed` - Feed experience batch\n- `grab_slot` - Capture slot state to bag\n- `restore_slot` - Restore slot from bag",
+          "description": "Enable advanced tools (5 tools: universal call, observe, slot state)",
           "order": 28
         },
         "champion.tools.cascade": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**CASCADE Observability** (7 tools)\n- `cascade_graph` - CausationGraph operations (create, add_event, add_link, get_causes, get_effects)\n- `cascade_chain` - ProvenanceChain operations (create_chain, add_record, finalize, verify)\n- `cascade_data` - Dataset observation (pii_scan, schema, license_check)\n- `cascade_system` - Universal log/file ingestion and MoE analysis\n- `cascade_instrument` - SDK auto-patching for LLM telemetry\n- `cascade_record` - Tape recording and Kleene/Interpretive logging\n- `cascade_proxy` - LLM API proxy for intercepting API calls",
+          "description": "Enable observability tools (7 tools: causation graph, provenance chain, data, system)",
           "order": 29
         },
         "champion.tools.cache": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Cache Management** (2 tools)\n- `get_cached` - Retrieve cached large response by ID\n- `clear_cache` - Clear response cache to free memory",
+          "description": "Enable cache management tools (2 tools: get cached, clear cache)",
           "order": 30
         },
         "champion.nostrEnabled": {
@@ -251,22 +267,53 @@
         },
         "champion.nostrRelays": {
           "type": "array",
-          "default": [
-            "wss://relay.damus.io",
-            "wss://nos.lol",
-            "wss://relay.nostr.band"
-          ],
-          "items": { "type": "string" },
-          "description": "Nostr relay WebSocket URLs for community features",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Community relay URLs (see extension docs for defaults)",
           "order": 41
+        },
+        "champion.communityChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable public chat in the Community tab",
+          "order": 42
+        },
+        "champion.communityDMs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable encrypted direct messages (NIP-04)",
+          "order": 43
+        },
+        "champion.communityMarketplace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable workflow marketplace browsing and publishing",
+          "order": 44
+        },
+        "champion.communityAutoRedact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-redact API keys, passwords, emails, file paths, IPs, and other sensitive data before sending messages",
+          "order": 45
+        },
+        "champion.communityPresence": {
+          "type": "boolean",
+          "default": true,
+          "description": "Share online presence with other community members",
+          "order": 46
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run package",
+    "compile": "node esbuild.js",
+    "compile:tsc": "tsc -p ./",
+    "package": "node esbuild.js --production",
+    "compress-capsule": "node scripts/compress-capsule.js",
+    "watch": "node esbuild.js --watch",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js"
@@ -277,12 +324,11 @@
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
+    "esbuild": "^0.27.3",
     "eslint": "^8.54.0",
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "@noble/hashes": "^2.0.1",
-    "@noble/secp256k1": "^3.0.0",
     "nostr-tools": "^2.23.1",
     "ws": "^8.19.0"
   }

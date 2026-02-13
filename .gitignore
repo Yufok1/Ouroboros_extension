@@ -1,23 +1,39 @@
-# node_modules excluded from VSIX via .vscodeignore selectively
-# node_modules
-out
+# Dependencies & build
+node_modules/
+out/
 .vscode-test/
 *.vsix
-.vscode
+.vscode/
+
+# Secrets & logs
 .env
-__pycache__
-*.pyc
 .mcp_server.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated images
 Gemini_Generated_Image_*.png
 
 # Source code — not for public GitHub
 src/
 media/
 scripts/
+esbuild.js
 champion_gen8.py
+resources/capsule.gz
+resources/icon_original.png
+resources/icon_small.png
 tsconfig.json
 package-lock.json
 .eslintrc.json
 .vscodeignore
 .vsixignore
 SETUP.md
+
+# Dev artifacts
+*.bak
+claudeoctor.txt
+HANDOFF_REPORT.md
+.cascade_feed/

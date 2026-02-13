@@ -1,42 +1,33 @@
-# Champion Council
+# Champion Council — AI Model Orchestrator
 
-The opposite of a black box. 140+ MCP tools. 8-slot model council. Semantic memory. Workflow engine. Decentralized community. All in one extension.
+A local AI orchestrator for VS Code and compatible editors. Manage multiple HuggingFace models, build workflows, and collaborate with other developers.
 
-## 7 Tabs
+## Features
 
-- **Overview** — Architecture diagram, generation stats, quine hash, tool category breakdown
-- **Council** — 8-slot grid. Plug/unplug HuggingFace models. Invoke, clone, mutate, swap.
-- **Memory** — FelixBag semantic vector store. Search, induct, catalog, export.
-- **Activity** — Live feed of every MCP tool call with timing, args, results.
-- **Tools** — Full registry of 140+ tools across 21 categories. Invoke any tool directly.
-- **Diagnostics** — Integrity verification, hash checks, CASCADE lattice, provenance chains.
-- **Community** — Decentralized workflow marketplace and live chat via Nostr protocol.
+- **8-Slot Model Council** — Plug any HuggingFace model into up to 8 slots. Run inference, debate, and chain outputs between models.
+- **140+ MCP Tools** — Full Model Context Protocol integration. Every function is an exposed tool for automation.
+- **Semantic Memory** — Local vector store for embedding and retrieving text, code, and context by meaning.
+- **Workflow Engine** — Create, execute, and share multi-step AI workflows.
+- **Community** — Share workflows and chat with other developers via the Nostr protocol.
 
-## 140+ MCP Tools
+## Installation
 
-Council/Slot Management (10) | FelixBag Memory (10) | HuggingFace Hub (8) | Workflow Automation (9) | Council Operations (7) | Batch Operations (5) | LLM Ops (3) | Diagnostics (6) | CASCADE Observability (7) | Status & Introspection (13) | Export (8) | Replication & Evolution (5) | Vast.AI GPU (13) | Visualization (5) | HOLD Protocol (2) | Security (3) | Cache (2) | Advanced (5)
+1. Install the extension.
+2. Ensure **Python 3.10+** is installed and available in your PATH.
+3. Open the **Champion Council** tab in the Activity Bar.
+4. The MCP server starts automatically.
 
-Toggle any category on/off: `Ctrl+,` > search "Champion"
+## Requirements
 
-## Workflow Engine
+- **Python 3.10+**
+- **numpy** (installed automatically)
+- **torch** (optional, for GPU inference)
+- **transformers** (optional, for HuggingFace models)
 
-DAG execution with 8 node types: `tool`, `fan_out`, `if`, `set`, `merge`, `http`, `input`, `output`. Any MCP tool is a workflow node. Parallel fan-out, conditional branching, auto-wiring.
+## How It Works
 
-## Community Marketplace
+The extension manages a local Python backend that provides AI inference, semantic search, and model management via the Model Context Protocol (MCP/SSE).
 
-Workflow sharing and live chat via Nostr. No server. No accounts. No Discord. Your identity is a cryptographic keypair stored in your OS keychain. Browse, publish, import, react.
+## License
 
-## Architecture
-
-```
-  IDE (Windsurf / VS Code) ── JSON-RPC over SSE ──> MCP Server
-  Extension WebView (7 tabs) ── postMessage ──> TypeScript backend
-  Nostr relays ── WebSocket ──> Community features
-  champion_gen8.py ── 8-slot council, FelixBag, CASCADE provenance
-```
-
-## Built on OUROBOROS
-
-Gen 8 quine architecture. Sentence-Transformers embedding. DreamerV3 RSSM world model. Scarecrow adapter. Council consensus. CASCADE-LATTICE provenance. Self-replicating. Fully transparent.
-
-By [Yufok1](https://github.com/Yufok1) | MIT
+MIT
