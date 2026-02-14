@@ -9,6 +9,10 @@
     let _state = {};
     let _activityLog = [];
     let _requestId = 0;
+    let _weblnAvailable = false;
+    let _web3Categories = [];
+    let _web3DocTypes = [];
+    let _userDID = '';
 
     // ── MESSAGE HANDLER ──
     window.addEventListener('message', function (e) {
@@ -112,6 +116,29 @@
                     break;
                 case 'nostrDocumentPublished':
                     if (msg.event) handleNostrEvent(msg.event);
+                    break;
+                // ── WEB3 MESSAGES ──
+                case 'web3DID':
+                    _userDID = msg.did || '';
+                    var didEl = document.getElementById('user-did');
+                    if (didEl) { didEl.textContent = _userDID ? _userDID.slice(0, 20) + '...' + _userDID.slice(-8) : 'Not generated'; }
+                    break;
+                case 'web3CID':
+                    console.log('[Web3] CID computed:', msg.cid);
+                    break;
+                case 'web3ReputationVC':
+                    console.log('[Web3] Reputation VC issued for', msg.pubkey);
+                    break;
+                case 'web3DocTypes':
+                    _web3DocTypes = msg.web3 || [];
+                    break;
+                case 'web3Categories':
+                    _web3Categories = msg.categories || [];
+                    updateWeb3CategoryFilters();
+                    break;
+                case 'weblnStatus':
+                    _weblnAvailable = !!msg.available;
+                    updateWeblnUI();
                     break;
                 case 'nostrStallCreated':
                     console.log('[Commerce] Stall created:', msg.event && msg.event.id);
@@ -2046,7 +2073,7 @@
             } catch (err) { console.error('[Community] Import failed:', err); }
             return;
         }
-        // Zap button (NIP-57 Lightning Zap)
+        // Zap button (NIP-57 Lightning Zap) — with WebLN one-click support
         var reactBtn = e.target.closest('[data-wf-react]');
         if (reactBtn) {
             var zapEventId = reactBtn.dataset.wfReact;
@@ -2055,7 +2082,7 @@
             if (!amountStr) return;
             var amountSats = parseInt(amountStr, 10);
             if (isNaN(amountSats) || amountSats < 1) { alert('Invalid amount'); return; }
-            reactBtn.textContent = 'ZAPPING...';
+            reactBtn.textContent = _weblnAvailable ? 'PAYING...' : 'ZAPPING...';
             reactBtn.disabled = true;
             vscode.postMessage({
                 command: 'nostrZap',
@@ -2068,7 +2095,7 @@
             vscode.postMessage({ command: 'nostrReact', eventId: zapEventId, eventPubkey: zapPubkey, reaction: '\u26A1' });
             // Track import rep for the publisher
             vscode.postMessage({ command: 'nostrAddReputation', pubkey: zapPubkey, action: 'RECEIVE_ZAP', multiplier: 1 });
-            setTimeout(function () { reactBtn.textContent = 'ZAP'; reactBtn.disabled = false; }, 3000);
+            setTimeout(function () { reactBtn.textContent = _weblnAvailable ? '\u26A1 ZAP' : 'ZAP'; reactBtn.disabled = false; }, 3000);
         }
     });
 
@@ -2642,6 +2669,37 @@
         });
     }
 
+    // ── WEB3 HELPERS ──
+    function updateWeb3CategoryFilters() {
+        var filterEl = document.getElementById('wf-category-filter');
+        if (!filterEl) return;
+        // Add Web3 categories as optgroup if not already present
+        var existingGroup = filterEl.querySelector('optgroup[label="Web3"]');
+        if (existingGroup) existingGroup.remove();
+        if (_web3Categories.length > 0) {
+            var group = document.createElement('optgroup');
+            group.label = 'Web3';
+            _web3Categories.forEach(function (cat) {
+                var opt = document.createElement('option');
+                opt.value = cat;
+                opt.textContent = cat.replace(/-/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+                group.appendChild(opt);
+            });
+            filterEl.appendChild(group);
+        }
+    }
+
+    function updateWeblnUI() {
+        // Update zap buttons to show lightning icon if WebLN available
+        if (_weblnAvailable) {
+            document.querySelectorAll('[data-wf-react]').forEach(function (btn) {
+                if (btn.textContent === 'ZAP') { btn.textContent = '\u26A1 ZAP'; }
+            });
+            var weblnBadge = document.getElementById('webln-badge');
+            if (weblnBadge) { weblnBadge.textContent = '\u26A1 WebLN'; weblnBadge.style.display = 'inline'; }
+        }
+    }
+
     // ── INIT ──
     buildToolsRegistry();
     renderSlots([]);
@@ -2658,6 +2716,10 @@
     vscode.postMessage({ command: 'githubGetAuth' });
     // Request UX settings
     vscode.postMessage({ command: 'uxGetSettings' });
+    // Request Web3 data (DID, categories, doc types)
+    vscode.postMessage({ command: 'web3GetDID' });
+    vscode.postMessage({ command: 'web3GetCategories' });
+    vscode.postMessage({ command: 'web3GetDocTypes' });
     // Auto-fetch community content
     setTimeout(function () {
         vscode.postMessage({ command: 'nostrFetchWorkflows' });

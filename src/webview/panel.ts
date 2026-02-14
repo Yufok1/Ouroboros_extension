@@ -589,6 +589,46 @@ export class CouncilPanel {
                 }
                 break;
             }
+            // ── WEB3: DID, CID, VCs, CATEGORIES ──
+            case 'web3GetDID': {
+                if (this.nostr) {
+                    this.send({ type: 'web3DID', did: this.nostr.getDID(), didDocument: this.nostr.getDIDDocument() });
+                }
+                break;
+            }
+            case 'web3ComputeCID': {
+                if (msg.content) {
+                    const { computeCID } = require('../web3');
+                    this.send({ type: 'web3CID', cid: computeCID(msg.content), contentLength: msg.content.length });
+                }
+                break;
+            }
+            case 'web3IssueReputationVC': {
+                if (this.nostr && msg.pubkey) {
+                    const vc = this.nostr.issueReputationCredential(msg.pubkey);
+                    this.send({ type: 'web3ReputationVC', pubkey: msg.pubkey, vc });
+                }
+                break;
+            }
+            case 'web3GetDocTypes': {
+                if (this.nostr) {
+                    this.send({ type: 'web3DocTypes', all: [...this.nostr.getAllDocTypes()], web3: [...this.nostr.getWeb3DocTypes()] });
+                }
+                break;
+            }
+            case 'web3GetCategories': {
+                if (this.nostr) {
+                    this.send({ type: 'web3Categories', categories: [...this.nostr.getWeb3Categories()] });
+                }
+                break;
+            }
+            case 'weblnPaymentResult': {
+                // WebLN payment result from webview — log and fire zap receipt tracking
+                if (msg.success && msg.eventId) {
+                    console.log(`[WebLN] Payment successful for event ${msg.eventId}, preimage: ${msg.preimage}`);
+                }
+                break;
+            }
             // ── GITHUB AUTH ──
             case 'githubAuth': {
                 if (this.github) {

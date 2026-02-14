@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
+import { computeCID, deriveDIDKey, createDIDDocument, issueReputationVC, createSafetyAttestation, WEB3_DOC_TYPES, WEB3_CATEGORIES, WEB3_DOC_SCHEMA_RULES, type Web3DocType, type VerifiableCredential, type SafetyAttestation } from './web3';
 // nostr-tools has proper CJS exports – safe for VS Code extension host
 const nostrTools = require('nostr-tools');
 
@@ -27,7 +28,7 @@ const PRODUCT_KIND = 30018; // NIP-15 product listing
 // ——————————————————————————————————————————————————————————————————————————————————————————
 
 const SCHEMA_VERSION = 1;
-const VALID_DOC_TYPES = ['workflow', 'skill', 'playbook', 'recipe'] as const;
+const VALID_DOC_TYPES = ['workflow', 'skill', 'playbook', 'recipe', ...WEB3_DOC_TYPES] as const;
 type DocType = typeof VALID_DOC_TYPES[number];
 const VALID_BODY_FORMATS = ['json', 'markdown', 'yaml', 'text'] as const;
 type BodyFormat = typeof VALID_BODY_FORMATS[number];
@@ -41,7 +42,7 @@ interface DocSchemaRules {
     bodyValidator?: (body: string) => string | null; // returns error or null
 }
 
-const DOC_SCHEMA_RULES: Record<DocType, DocSchemaRules> = {
+const DOC_SCHEMA_RULES: Record<string, DocSchemaRules> = {
     workflow: {
         maxBodyBytes: 512000,
         minBodyBytes: 2,
@@ -66,7 +67,9 @@ const DOC_SCHEMA_RULES: Record<DocType, DocSchemaRules> = {
         maxBodyBytes: 102400,
         minBodyBytes: 10,
         defaultBodyFormat: 'text',
-    }
+    },
+    // Web3 / Vibe Coding document types
+    ...WEB3_DOC_SCHEMA_RULES
 };
 
 interface DocValidationResult {
@@ -128,9 +131,11 @@ function validateDocument(doc: {
     return { valid: errors.length === 0, errors, warnings };
 }
 
-function computeContentDigest(body: string): string {
+function computeContentDigest(body: string): { hex: string; cid: string } {
     const crypto = require('crypto');
-    return crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+    const hex = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+    const cid = computeCID(body);
+    return { hex, cid };
 }
 
 // ——————————————————————————————————————————————————————————————————————————————————————————
@@ -561,6 +566,38 @@ export class NostrService {
     }
 
     // ——————————————————————————————————————————————————————————————————————————————————————————
+    // WEB3: DID, VERIFIABLE CREDENTIALS, CATEGORIES
+    // Pure local crypto — no subscriptions, no external services
+    // ——————————————————————————————————————————————————————————————————————————————————————————
+
+    getDID(): string {
+        if (!this.publicKey) { return ''; }
+        return deriveDIDKey(this.publicKey);
+    }
+
+    getDIDDocument(): object {
+        if (!this.publicKey) { return {}; }
+        return createDIDDocument(this.publicKey);
+    }
+
+    issueReputationCredential(subjectPubkey: string): VerifiableCredential {
+        const entry = this.ensureRepEntry(subjectPubkey);
+        return issueReputationVC(this.publicKey, subjectPubkey, entry.level, entry.points);
+    }
+
+    getWeb3Categories(): readonly string[] {
+        return WEB3_CATEGORIES;
+    }
+
+    getWeb3DocTypes(): readonly string[] {
+        return WEB3_DOC_TYPES;
+    }
+
+    getAllDocTypes(): readonly string[] {
+        return VALID_DOC_TYPES;
+    }
+
+    // ——————————————————————————————————————————————————————————————————————————————————————————
     // PROFILES (NIP-01 kind 0)
     // ——————————————————————————————————————————————————————————————————————————————————————————
 
@@ -776,7 +813,10 @@ export class NostrService {
 
         // Auto-redact the description
         const { redacted: safeDesc } = this.redact(description);
-        const contentDigest = computeContentDigest(body);
+        const { hex: contentDigestHex, cid: contentCID } = computeContentDigest(body);
+
+        // Generate safety attestation with CID
+        const attestation = createSafetyAttestation(this.publicKey, contentCID, scan, resolvedType);
 
         const nostrTags: string[][] = [
             ['t', 'ouroboros'],
@@ -787,6 +827,8 @@ export class NostrService {
             ['summary', safeDesc],
             ['c', category],
             ...tags.map(t => ['t', t]),
+            // IPFS CID for content verification
+            ['i', contentCID],
             // NIP-57 zap split: creator 80%, platform 20% (platform = self until configured)
             ...NostrService.buildZapSplitTags(this.publicKey)
         ];
@@ -807,7 +849,9 @@ export class NostrService {
                 category,
                 complexity,
                 estTime,
-                contentDigest,
+                contentDigest: contentDigestHex,
+                contentCID,
+                safetyAttestation: attestation.uid,
                 ...(gistUrl ? { gistUrl } : {}),
                 ...(gistId ? { gistId } : {})
             })

@@ -2,6 +2,18 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.4.0] - 2026-02-13
+- **Added**: `src/web3.ts` — Zero-cost cryptographic Web3 utilities (no subscriptions, no APIs, pure local computation).
+- **Added**: IPFS CIDv1 generation — `computeCID()` produces proper content-addressed identifiers from any content. Published marketplace documents now include `contentCID` and an `['i', cid]` tag.
+- **Added**: DID:key derivation — `deriveDIDKey()` produces W3C Decentralized Identifiers from existing Nostr secp256k1 keys. `getDID()`, `getDIDDocument()` on NostrService.
+- **Added**: Verifiable Credentials — `issueReputationVC()` creates W3C VC Data Model credentials for reputation levels. Self-issued, locally computed, tamper-evident via SHA-256 proof.
+- **Added**: Safety Attestations — `createSafetyAttestation()` generates EAS-inspired cryptographic receipts for safety scan results, linked to document CIDs.
+- **Added**: Web3 marketplace document types: `smartcontract`, `dapp-template`, `testnet-config`, `audit-report`, `chain-recipe` — with per-type schema validation (Solidity keyword check, JSON structure validation, etc.).
+- **Added**: 15 Web3/vibe-coding marketplace categories: `solidity`, `vyper`, `evm`, `defi`, `nft`, `dao`, `token`, `bridge`, `oracle`, `identity`, `storage`, `testing`, `security`, `gas-optimization`, `web3-tooling`.
+- **Added**: WebLN Lightning wallet detection — detects Alby/Zeus/BlueWallet, upgrades zap buttons to one-click payment with manual fallback.
+- **Added**: Web3 category filters in marketplace UI — dynamic `<optgroup>` injection for Web3 categories.
+- **Added**: Panel message handlers: `web3GetDID`, `web3ComputeCID`, `web3IssueReputationVC`, `web3GetDocTypes`, `web3GetCategories`, `weblnPaymentResult`.
+
 ## [0.3.7] - 2026-02-13
 - **Fixed**: Diagnostics compact view now dynamically extracts ALL fields from tool responses instead of a hardcoded subset that missed most data.
 - **Fixed**: Nested tool response objects (weights, params, config, adapter shapes) are flattened and displayed in the KV grid.
