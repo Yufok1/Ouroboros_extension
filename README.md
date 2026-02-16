@@ -56,6 +56,7 @@ All settings live under `champion.*` in VS Code Settings.
 | `champion.evaluation.enabled` | Enable model evaluation tracking |
 | `champion.ipfs.provider` | IPFS provider: `none`, `pinata`, `web3storage` |
 | `champion.ipfs.apiKey` | API key for IPFS provider |
+| `champion.memory.gistPublish` | Enable Gist publishing on memory items (default: off) |
 
 ## Commands
 
@@ -64,11 +65,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.6.6
+## What's New in 0.7.0
 
-- **Windows activity feed fix** — External tool calls now detected reliably on Windows (file sharing fix in log poller).
-- **Activity feed stability** — Expanded views persist across sync ticks. Text selection works in drill-downs.
-- **Workflow DX** — Error messages show which expressions failed, available output keys, and suggestions. Comprehensive expression syntax guide embedded.
+- **FelixBag auto-persistence** — Bag state survives process restarts. Auto-load on startup, atexit save, 5-minute background save.
+- **Cascade state persistence** — Chains and graphs backed by FelixBag. No more lost state on restart.
+- **FelixBag → Gist publishing** — Publish any memory item to a versioned GitHub Gist directly from the Memory tab. Cascade state included.
+- **Model loading stability** — 10-minute timeout for large model loads. SSE heartbeat suppressed during long operations.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

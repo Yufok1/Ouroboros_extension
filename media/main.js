@@ -212,6 +212,12 @@
                 case 'gistIndexingComplete':
                     handleGistIndexingComplete(msg);
                     break;
+                case 'bagGistResult':
+                    handleBagGistResult(msg);
+                    break;
+                case 'bagGistMeta':
+                    handleBagGistMeta(msg);
+                    break;
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
                     break;
@@ -1781,6 +1787,47 @@
     }
     window.drillMemItem = drillMemItem;
 
+    function publishBagToGist(btn) {
+        var key = btn.getAttribute('data-bag-key');
+        if (!key) return;
+        var gistId = btn.getAttribute('data-gist-id') || null;
+        btn.textContent = gistId ? 'Updating…' : 'Publishing…';
+        btn.disabled = true;
+        vscode.postMessage({ type: 'publishBagToGist', key: key, gistId: gistId, displayName: key });
+    }
+    window.publishBagToGist = publishBagToGist;
+
+    function handleBagGistResult(msg) {
+        // Find the button for this key and update
+        var safeKey = (msg.key || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+        var btn = document.getElementById('gist-btn-' + safeKey);
+        if (msg.error) {
+            if (btn) { btn.textContent = 'Failed'; btn.disabled = false; btn.style.color = '#e11d48'; }
+            console.error('[BagGist]', msg.error);
+            return;
+        }
+        if (btn) {
+            btn.textContent = msg.updated ? 'Updated' : 'Published';
+            btn.style.color = '#22c55e';
+            btn.setAttribute('data-gist-id', msg.gistId || '');
+            setTimeout(function () {
+                btn.textContent = 'Update Gist';
+                btn.style.color = 'var(--accent)';
+                btn.disabled = false;
+            }, 2000);
+        }
+    }
+
+    function handleBagGistMeta(msg) {
+        var safeKey = (msg.key || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+        var btn = document.getElementById('gist-btn-' + safeKey);
+        if (btn && msg.gistId) {
+            btn.setAttribute('data-gist-id', msg.gistId);
+            btn.textContent = 'Update Gist';
+            btn.title = 'Linked to gist: ' + msg.gistId;
+        }
+    }
+
     function _renderLineNumbered(text) {
         var lines = String(text).split('\n');
         var gutterW = String(lines.length).length;
@@ -1893,9 +1940,22 @@
                         }
                         var contentStr = typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val || '');
                         var lineCount = contentStr.split('\n').length;
+                        var verNum = got.version || 1;
+                        var showGist = _state && _state.gistPublishEnabled && _state.githubAuthenticated;
+                        var gistBtnHtml = '';
+                        if (showGist) {
+                            var gistBtnId = 'gist-btn-' + _openDrillKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+                            gistBtnHtml = '<button id="' + gistBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="publishBagToGist(this)" style="font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:var(--accent);border:1px solid var(--border);border-radius:3px;">Publish to Gist</button>';
+                        }
                         drillDiv.innerHTML =
-                            '<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);">' + lineCount + ' lines · ' + _fmtSize(contentStr.length) + '</div>' +
+                            '<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">' +
+                                '<span>' + lineCount + ' lines · ' + _fmtSize(contentStr.length) + ' · v' + verNum + '</span>' +
+                                gistBtnHtml +
+                            '</div>' +
                             _renderLineNumbered(contentStr);
+                        if (showGist) {
+                            vscode.postMessage({ type: 'getBagGistMeta', key: _openDrillKey });
+                        }
                     } catch (e) {
                         drillDiv.innerHTML = '<pre style="padding:8px 12px;color:var(--text);white-space:pre-wrap;font-size:11px;">' + _esc(text) + '</pre>';
                     }

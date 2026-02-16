@@ -153,6 +153,7 @@ export class MCPServerManager {
     private _hasAttemptedRestart: boolean = false;
     private _cacheCleanupTimer: ReturnType<typeof setInterval> | null = null;
     private static readonly SSE_HEARTBEAT_TIMEOUT_MS = 60000; // 60s no data = dead
+    private _longRunningCallActive: number = 0; // counter: >0 suppresses heartbeat timeout
     private static readonly CACHE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30 min
     private static readonly LOG_MAX_SIZE = 5 * 1024 * 1024; // 5MB
     private static readonly LOG_KEEP_SIZE = 1 * 1024 * 1024; // keep last 1MB
@@ -463,7 +464,7 @@ export class MCPServerManager {
         this._sseHeartbeatTimer = setInterval(() => {
             if (this._status !== 'running') { return; }
             const elapsed = Date.now() - this._lastSseDataTime;
-            if (elapsed > MCPServerManager.SSE_HEARTBEAT_TIMEOUT_MS) {
+            if (elapsed > MCPServerManager.SSE_HEARTBEAT_TIMEOUT_MS && this._longRunningCallActive <= 0) {
                 console.warn(`[MCP] SSE heartbeat timeout (${Math.round(elapsed / 1000)}s no data) — triggering reconnect`);
                 this._lastSseDataTime = Date.now(); // prevent re-trigger
                 if (this._sseResponse) {
@@ -1502,11 +1503,13 @@ export class MCPServerManager {
             });
         }
 
+        const isLongRunning = LONG_RUNNING_TOOLS.includes(toolName);
+        if (isLongRunning) { this._longRunningCallActive++; }
         try {
             const result = await this.sendRequest('tools/call', {
                 name: toolName,
                 arguments: args
-            });
+            }, isLongRunning ? 600000 : 120000);
             const durationMs = Date.now() - startTime;
 
             if (!suppressActivity) {
@@ -1540,6 +1543,8 @@ export class MCPServerManager {
                 });
             }
             throw error;
+        } finally {
+            if (isLongRunning) { this._longRunningCallActive--; }
         }
     }
 

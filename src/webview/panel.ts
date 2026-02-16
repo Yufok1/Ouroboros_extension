@@ -194,6 +194,7 @@ export class CouncilPanel {
         // (send() is a no-op when panel is null).
         const counts = this.mcp.getToolCounts();
         const categories = this.mcp.getEnabledCategories();
+        const gistPublishEnabled = vscode.workspace.getConfiguration('champion.memory').get<boolean>('gistPublish', false);
         this.send({
             type: 'state',
             serverStatus: this.mcp.status,
@@ -201,7 +202,9 @@ export class CouncilPanel {
             port: this.mcp.port,
             toolCounts: counts,
             categories,
-            activityLog: this.activityLog.slice(-50)
+            activityLog: this.activityLog.slice(-50),
+            gistPublishEnabled,
+            githubAuthenticated: !!this.github?.isAuthenticated
         });
 
         // Nostr identity — always push, even when nostr is unavailable.
@@ -835,6 +838,64 @@ export class CouncilPanel {
                     } catch (err: any) {
                         this.send({ type: 'nostrError', error: 'List gists failed: ' + err.message });
                     }
+                }
+                break;
+            }
+            // ── FELIXBAG ↔ GIST BRIDGE ──
+            case 'publishBagToGist': {
+                if (!this.github) {
+                    this.send({ type: 'bagGistResult', error: 'GitHub not authenticated. Set a Personal Access Token in settings.' });
+                    break;
+                }
+                if (!msg.key) {
+                    this.send({ type: 'bagGistResult', error: 'No bag item key provided.' });
+                    break;
+                }
+                try {
+                    const bagResult = await this.callToolParsed('bag_get', { key: msg.key }, { suppressActivity: true, source: 'internal' });
+                    const value = bagResult?.value ?? bagResult;
+                    const contentStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value || '');
+                    const itemType = bagResult?.type || msg.itemType || 'text';
+                    const displayName = msg.displayName || msg.key;
+                    const existingGistId = msg.gistId; // passed from UI if previously linked
+
+                    const meta: Record<string, any> = {
+                        docType: itemType === 'json' ? 'workflow' : 'document',
+                        bodyFormat: itemType,
+                        category: 'felixbag',
+                        bagKey: msg.key
+                    };
+
+                    let gist;
+                    if (existingGistId) {
+                        gist = await this.github.updateGist(existingGistId, displayName, contentStr, `FelixBag item: ${displayName}`, meta);
+                    } else {
+                        gist = await this.github.createGist(displayName, contentStr, `FelixBag item: ${displayName}`, msg.isPublic !== false, meta);
+                    }
+
+                    // Store gist ID back in FelixBag metadata by re-inducting with gist_id marker
+                    const metaContent = JSON.stringify({ _gist_id: gist.id, _gist_url: gist.url, _gist_updated: new Date().toISOString(), _original: contentStr });
+                    await this.callToolParsed('bag_put', { key: msg.key + ':gist_meta', value: metaContent }, { suppressActivity: true, source: 'internal' });
+
+                    this.send({ type: 'bagGistResult', success: true, key: msg.key, gistId: gist.id, gistUrl: gist.url, updated: !!existingGistId });
+                } catch (err: any) {
+                    this.send({ type: 'bagGistResult', error: 'Gist publish failed: ' + err.message });
+                }
+                break;
+            }
+            case 'getBagGistMeta': {
+                if (!msg.key) { break; }
+                try {
+                    const meta = await this.callToolParsed('bag_get', { key: msg.key + ':gist_meta' }, { suppressActivity: true, source: 'internal' });
+                    const val = meta?.value ?? meta;
+                    if (val && typeof val === 'string') {
+                        const parsed = JSON.parse(val);
+                        this.send({ type: 'bagGistMeta', key: msg.key, gistId: parsed._gist_id, gistUrl: parsed._gist_url });
+                    } else {
+                        this.send({ type: 'bagGistMeta', key: msg.key, gistId: null });
+                    }
+                } catch {
+                    this.send({ type: 'bagGistMeta', key: msg.key, gistId: null });
                 }
                 break;
             }
