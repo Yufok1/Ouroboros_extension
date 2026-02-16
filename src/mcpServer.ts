@@ -628,7 +628,9 @@ export class MCPServerManager {
         }
 
         this._mcpLogPollTimer = setInterval(() => {
-            this.pollMcpLogForActivity().catch(() => {});
+            this.pollMcpLogForActivity().catch((err) => {
+                console.error('[MCP] Log poll error:', err?.message || err);
+            });
             this.rotateLogIfNeeded().catch(() => {});
         }, 750);
     }
@@ -685,13 +687,12 @@ export class MCPServerManager {
 
         let stat: fs.Stats;
         try {
-            stat = await fs.promises.stat(this._mcpLogPath);
+            stat = fs.statSync(this._mcpLogPath);
         } catch {
             return;
         }
 
         if (stat.size < this._mcpLogOffset) {
-            // File rotated/truncated.
             this._mcpLogOffset = 0;
             this._mcpLogRemainder = '';
         }
@@ -701,31 +702,27 @@ export class MCPServerManager {
         }
 
         const bytesToRead = stat.size - this._mcpLogOffset;
-        if (bytesToRead <= 0) {
-            return;
-        }
+        if (bytesToRead <= 0) { return; }
 
         const MAX_TAIL_BYTES = 512 * 1024;
         if (bytesToRead > MAX_TAIL_BYTES) {
-            // Skip very old backlog and read only the recent tail.
             this._mcpLogOffset = stat.size - MAX_TAIL_BYTES;
             this._mcpLogRemainder = '';
         }
 
         const readBytes = stat.size - this._mcpLogOffset;
-        if (readBytes <= 0) {
-            return;
-        }
+        if (readBytes <= 0) { return; }
 
-        const fileHandle = await fs.promises.open(this._mcpLogPath, 'r');
-        let chunk = '';
+        // Use readFileSync + slice instead of open()+read() — Windows file
+        // sharing semantics cause open('r') to fail with EBUSY/EACCES when
+        // the Python MCP server has the log open for append.
+        let chunk: string;
         try {
-            const buffer = Buffer.alloc(readBytes);
-            await fileHandle.read(buffer, 0, readBytes, this._mcpLogOffset);
-            chunk = buffer.toString('utf8');
+            const fullBuf = fs.readFileSync(this._mcpLogPath);
+            chunk = fullBuf.subarray(this._mcpLogOffset, this._mcpLogOffset + readBytes).toString('utf8');
             this._mcpLogOffset = stat.size;
-        } finally {
-            await fileHandle.close();
+        } catch {
+            return;
         }
 
         const text = this._mcpLogRemainder + chunk;
@@ -737,10 +734,8 @@ export class MCPServerManager {
             const parsed = this.parseToolLine(line);
             if (!parsed) { continue; }
             if (this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) {
-                console.log(`[MCP] Activity suppressed (local echo): ${parsed.tool}`);
                 continue;
             }
-            console.log(`[MCP] Activity detected (external): ${parsed.tool}`);
 
             this.emitActivity({
                 timestamp: parsed.timestamp,
@@ -752,7 +747,6 @@ export class MCPServerManager {
                 source: 'external'
             });
 
-            // External workflow calls: fetch real execution data and re-emit with full payload
             if (parsed.tool === 'workflow_execute' || parsed.tool === 'workflow_status') {
                 this.fetchExternalWorkflowResult(parsed).catch(() => {});
             }

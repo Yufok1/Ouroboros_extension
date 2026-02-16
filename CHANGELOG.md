@@ -2,12 +2,13 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.6.6] - 2026-02-16
+- **Fixed**: External activity detection on Windows — log poller now uses `readFileSync` + buffer slice instead of `open()`/`read()` which failed silently due to Windows file sharing semantics.
+- **Fixed**: Poller errors now logged instead of silently swallowed.
+
 ## [0.6.5] - 2026-02-16
-- **Fixed**: Activity feed no longer resets expanded detail views every 5 seconds. New events append to the DOM instead of rebuilding.
-- **Fixed**: Text selection in activity detail drill-downs no longer collapses the entry on mouseup.
-- **Added**: `user-select: text` on activity detail panes for proper copy/paste support.
-- **Added**: Diagnostic logging for MCP log path resolution and external activity detection.
-- **Added**: Kiro and Antigravity IDE paths to MCP log file discovery (joins Windsurf, Cursor, Code, Code-Insiders).
+- **Fixed**: Activity feed expanded views no longer reset on sync tick. Text selection works in drill-downs.
+- **Added**: Kiro and Antigravity IDE paths to MCP log discovery.
 
 ## [0.6.4] - 2026-02-16
 - **Improved**: Workflow engine error messages now show exactly which `{{$expr}}` failed to resolve, what keys the referenced node actually has, and suggest corrections. Eliminates blind debugging of "unresolved expression" errors.
