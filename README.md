@@ -4,6 +4,9 @@ Local-first AI orchestration for VS Code and compatible editors. Run multi-model
 
 ## What's New
 
+### 0.6.5
+- **Activity feed stability** — Expanded detail views no longer reset on every sync tick. Text selection and copy/paste now work inside drill-downs.
+
 ### 0.6.4
 - **Workflow DX overhaul** — Error messages now show exactly which expressions failed, what output keys are available, and what nodes are missing. Embedded `workflow_automation_guide` expanded with two-pass resolution rules, output key reference table, and common mistake patterns.
 

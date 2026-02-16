@@ -2497,6 +2497,8 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     overflow: auto;
     display: none;
     white-space: pre-wrap;
+    user-select: text;
+    cursor: text;
     word-break: break-all;
     border-left: 2px solid var(--accent);
     line-height: 1.5;

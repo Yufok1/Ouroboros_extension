@@ -582,6 +582,8 @@ export class MCPServerManager {
                 path.join(homeDir, 'Cursor', 'User', 'globalStorage', extId),
                 path.join(homeDir, 'Code', 'User', 'globalStorage', extId),
                 path.join(homeDir, 'Code - Insiders', 'User', 'globalStorage', extId),
+                path.join(homeDir, 'Kiro', 'User', 'globalStorage', extId),
+                path.join(homeDir, 'Antigravity', 'User', 'globalStorage', extId),
             ];
             for (const p of ideStoragePaths) {
                 candidates.push(path.join(p, '.mcp_server.log'));
@@ -619,8 +621,10 @@ export class MCPServerManager {
             const stat = fs.statSync(this._mcpLogPath);
             // Start at EOF so we only emit fresh activity for this session.
             this._mcpLogOffset = stat.size;
+            console.log(`[MCP] Log polling started: ${this._mcpLogPath} (offset=${stat.size})`);
         } catch {
             this._mcpLogOffset = 0;
+            console.log(`[MCP] Log polling started: ${this._mcpLogPath} (file not found, offset=0)`);
         }
 
         this._mcpLogPollTimer = setInterval(() => {
@@ -732,7 +736,11 @@ export class MCPServerManager {
             if (!line.trim()) { continue; }
             const parsed = this.parseToolLine(line);
             if (!parsed) { continue; }
-            if (this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) { continue; }
+            if (this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) {
+                console.log(`[MCP] Activity suppressed (local echo): ${parsed.tool}`);
+                continue;
+            }
+            console.log(`[MCP] Activity detected (external): ${parsed.tool}`);
 
             this.emitActivity({
                 timestamp: parsed.timestamp,

@@ -36,8 +36,13 @@
                     var prevStatus = _state ? _state.serverStatus : '';
                     _state = msg;
                     if (msg.activityLog) {
+                        // First state message hydrates the activity feed;
+                        // subsequent syncs only update the backing array
+                        // without re-rendering (preserves expanded details).
+                        // Individual 'activity' events handle live rendering.
+                        var needsRender = _activityLog.length === 0 && msg.activityLog.length > 0;
                         _activityLog = msg.activityLog;
-                        renderActivityFeed();
+                        if (needsRender) renderActivityFeed();
                     }
                     updateHeader(msg);
                     updateCatBars(msg.categories);
@@ -611,7 +616,65 @@
         if (event.tool === 'workflow_execute' || event.tool === 'workflow_status') {
             handleWorkflowActivity(event);
         }
-        renderActivityFeed();
+        // Append new entry to DOM without destroying expanded entries
+        var feed = document.getElementById('activity-feed');
+        if (feed) {
+            // Remove "No activity yet" placeholder if present
+            var placeholder = feed.querySelector('.activity-entry[style*="text-align:center"]');
+            if (placeholder) placeholder.remove();
+            var node = _buildActivityNode(event);
+            if (node) feed.insertBefore(node, feed.firstChild);
+            // Trim to 50 visible entries
+            while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+        }
+    }
+
+    function _actEsc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    function _buildActivityNode(e) {
+        var ts = new Date(e.timestamp).toLocaleTimeString();
+        var fullTs = new Date(e.timestamp).toISOString();
+        var hasError = !!e.error;
+        var source = e.source || 'extension';
+
+        var detail = '';
+        detail += '<div class="ad-section"><span class="ad-label">Timestamp</span>\n' + fullTs + '</div>';
+        detail += '<div class="ad-section"><span class="ad-label">Source</span>\n' + _actEsc(source) + '</div>';
+        detail += '<div class="ad-section"><span class="ad-label">Category</span>\n' + _actEsc(e.category || 'unknown') + '</div>';
+        detail += '<div class="ad-section"><span class="ad-label">Duration</span>\n' + (e.durationMs || 0) + 'ms</div>';
+        if (hasError) {
+            detail += '<div class="ad-section" style="color:var(--red)"><span class="ad-label">Error</span>\n' + _actEsc(e.error) + '</div>';
+        }
+        if (e.args && Object.keys(e.args).length > 0) {
+            detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\n' + _actEsc(JSON.stringify(e.args, null, 2)) + '</div>';
+        } else {
+            detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\nNone</div>';
+        }
+        if (e.result) {
+            var resultStr = typeof e.result === 'string' ? e.result : JSON.stringify(e.result, null, 2);
+            detail += '<div class="ad-section"><span class="ad-label">Result</span>\n' + _actEsc(resultStr.substring(0, 4000)) + '</div>';
+        }
+
+        var sourceBadge = source === 'external'
+            ? '<span class="activity-cat" style="border-color:var(--blue);color:var(--blue);">EXTERNAL</span>'
+            : '';
+        var div = document.createElement('div');
+        div.className = 'activity-entry';
+        div.onclick = function () {
+            var sel = window.getSelection();
+            if (sel && sel.toString().length > 0) return; // don't toggle when selecting text
+            div.classList.toggle('expanded');
+        };
+        div.innerHTML =
+            '<span class="activity-ts">' + ts + '</span> ' +
+            '<span class="activity-tool">' + _actEsc(e.tool) + '</span>' +
+            '<span class="activity-cat">' + _actEsc(e.category) + '</span>' +
+            sourceBadge +
+            '<span class="activity-duration">' + (e.durationMs || 0) + 'ms</span>' +
+            (hasError ? ' <span style="color:var(--red);">ERR</span>' : '') +
+            '<span class="activity-expand-hint">click to expand</span>' +
+            '<pre class="activity-detail">' + detail + '</pre>';
+        return div;
     }
 
     function renderActivityFeed() {
@@ -633,47 +696,10 @@
         }
 
         var recent = filtered.slice(-50).reverse();
-        feed.innerHTML = recent.map(function (e) {
-            var ts = new Date(e.timestamp).toLocaleTimeString();
-            var fullTs = new Date(e.timestamp).toISOString();
-            var hasError = !!e.error;
-            var source = e.source || 'extension';
-
-            // Build rich detail sections
-            var detail = '';
-            detail += '<div class="ad-section"><span class="ad-label">Timestamp</span>\n' + fullTs + '</div>';
-            detail += '<div class="ad-section"><span class="ad-label">Source</span>\n' + esc(source) + '</div>';
-            detail += '<div class="ad-section"><span class="ad-label">Category</span>\n' + esc(e.category || 'unknown') + '</div>';
-            detail += '<div class="ad-section"><span class="ad-label">Duration</span>\n' + (e.durationMs || 0) + 'ms</div>';
-            if (hasError) {
-                detail += '<div class="ad-section" style="color:var(--red)"><span class="ad-label">Error</span>\n' + esc(e.error) + '</div>';
-            }
-            if (e.args && Object.keys(e.args).length > 0) {
-                detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\n' + esc(JSON.stringify(e.args, null, 2)) + '</div>';
-            } else {
-                detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\nNone</div>';
-            }
-            if (e.result) {
-                var resultStr = typeof e.result === 'string' ? e.result : JSON.stringify(e.result, null, 2);
-                detail += '<div class="ad-section"><span class="ad-label">Result</span>\n' + esc(resultStr.substring(0, 4000)) + '</div>';
-            }
-
-            var sourceBadge = source === 'external'
-                ? '<span class="activity-cat" style="border-color:var(--blue);color:var(--blue);">EXTERNAL</span>'
-                : '';
-            return '<div class="activity-entry" onclick="this.classList.toggle(\'expanded\')">' +
-                '<span class="activity-ts">' + ts + '</span> ' +
-                '<span class="activity-tool">' + esc(e.tool) + '</span>' +
-                '<span class="activity-cat">' + esc(e.category) + '</span>' +
-                sourceBadge +
-                '<span class="activity-duration">' + (e.durationMs || 0) + 'ms</span>' +
-                (hasError ? ' <span style="color:var(--red);">ERR</span>' : '') +
-                '<span class="activity-expand-hint">click to expand</span>' +
-                '<pre class="activity-detail">' + detail + '</pre>' +
-                '</div>';
-        }).join('');
-
-        function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+        feed.innerHTML = '';
+        recent.forEach(function (e) {
+            feed.appendChild(_buildActivityNode(e));
+        });
     }
 
     var activityFilterEl = document.getElementById('activity-filter');
