@@ -9,6 +9,24 @@ const GITHUB_API = 'https://api.github.com';
 const GIST_DESCRIPTION_PREFIX = '[Ouroboros';
 const VALID_GIST_DOC_TYPES = ['workflow', 'skill', 'playbook', 'recipe'];
 
+export interface GistSearchResult {
+    id: string;
+    description: string;
+    files: Record<string, { filename: string; language?: string; size?: number; raw_url?: string }>;
+    owner: { login: string; avatar_url: string } | null;
+    created_at: string;
+    updated_at: string;
+    html_url: string;
+    public: boolean;
+}
+
+export interface GistSearchOptions {
+    docType?: string;
+    language?: string;
+    page?: number;
+    perPage?: number;
+}
+
 export interface GistFile {
     filename: string;
     content: string;
@@ -280,49 +298,183 @@ export class GitHubService {
     }
 
     // ——————————————————————————————————————————————————————————————————————————————————————————
+    // PUBLIC GIST SEARCH (marketplace population)
+    // ——————————————————————————————————————————————————————————————————————————————————————————
+
+    /**
+     * Search public gists via gist.github.com/search (HTML scrape for gist IDs)
+     * then hydrate via REST API. GitHub has no gist search API — this is the
+     * only way to get real search results.
+     */
+    async searchPublicGists(query: string, options: GistSearchOptions = {}): Promise<GistSearchResult[]> {
+        const perPage = options.perPage || 20;
+        const page = options.page || 1;
+
+        // Build search URL with qualifiers
+        let searchQ = query;
+        if (options.language) {
+            searchQ += ` language:${options.language}`;
+        } else if (options.docType) {
+            const langMap: Record<string, string> = {
+                smartcontract: 'solidity',
+                'testnet-config': 'toml',
+                skill: 'python',
+            };
+            if (langMap[options.docType]) {
+                searchQ += ` language:${langMap[options.docType]}`;
+            }
+        }
+
+        // Primary: scrape gist.github.com/search for real results
+        try {
+            const url = `https://gist.github.com/search?q=${encodeURIComponent(searchQ)}&p=${page}`;
+            const resp = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Ouroboros-Champion-Council',
+                    'Accept': 'text/html'
+                }
+            });
+            if (resp.ok) {
+                const html = await resp.text();
+                // Extract gist IDs from search result HTML
+                // Links look like: href="/username/hexid" or href="/hexid"
+                const gistIdPattern = /href="\/([a-zA-Z0-9_-]+)\/([a-f0-9]{20,})">/gi;
+                const ids = new Set<string>();
+                let match;
+                while ((match = gistIdPattern.exec(html)) !== null) {
+                    ids.add(match[2]);
+                }
+                // Also try bare gist links
+                const barePattern = /href="\/([a-f0-9]{20,})">/gi;
+                while ((match = barePattern.exec(html)) !== null) {
+                    ids.add(match[1]);
+                }
+
+                if (ids.size > 0) {
+                    const results: GistSearchResult[] = [];
+                    for (const id of ids) {
+                        if (results.length >= perPage) { break; }
+                        try {
+                            const gist = await this.apiGet(`/gists/${id}`);
+                            results.push(this.parseGistSearchResult(gist));
+                        } catch { /* skip inaccessible */ }
+                    }
+                    if (results.length > 0) { return results; }
+                }
+            }
+        } catch {
+            // gist.github.com scrape failed — fall through
+        }
+
+        // Fallback: fetch public gists firehose (multiple pages for variety)
+        const results: GistSearchResult[] = [];
+        try {
+            for (let p = page; p < page + 3 && results.length < perPage; p++) {
+                const gists = await this.apiGet(`/gists/public?per_page=100&page=${p}`);
+                for (const g of (gists as any[])) {
+                    if (results.length >= perPage) { break; }
+                    // Include all gists — let client-side filter handle relevance
+                    results.push(this.parseGistSearchResult(g));
+                }
+            }
+        } catch { /* partial results OK */ }
+        return results;
+    }
+
+    async fetchGistContent(gistId: string): Promise<GistInfo> {
+        const result = await this.apiGet(`/gists/${gistId}`);
+        return this.parseGistResponse(result);
+    }
+
+    private parseGistSearchResult(raw: any): GistSearchResult {
+        const files: Record<string, any> = {};
+        for (const [name, f] of Object.entries(raw.files || {})) {
+            const file = f as any;
+            files[name] = {
+                filename: file.filename,
+                language: file.language,
+                size: file.size,
+                raw_url: file.raw_url
+            };
+        }
+        return {
+            id: raw.id,
+            description: raw.description || '',
+            files,
+            owner: raw.owner ? { login: raw.owner.login, avatar_url: raw.owner.avatar_url } : null,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+            html_url: raw.html_url,
+            public: raw.public ?? true
+        };
+    }
+
+    // ——————————————————————————————————————————————————————————————————————————————————————————
     // HTTP HELPERS
     // ——————————————————————————————————————————————————————————————————————————————————————————
 
+    private static readonly API_TIMEOUT_MS = 30000; // 30s timeout for all API calls
+
     private async apiGet(path: string): Promise<any> {
-        const resp = await fetch(`${GITHUB_API}${path}`, {
-            headers: this.headers()
-        });
-        if (!resp.ok) { throw new Error(`GitHub API ${resp.status}: ${resp.statusText}`); }
-        return resp.json();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), GitHubService.API_TIMEOUT_MS);
+        try {
+            const resp = await fetch(`${GITHUB_API}${path}`, {
+                headers: this.headers(),
+                signal: controller.signal as any
+            });
+            if (!resp.ok) { throw new Error(`GitHub API ${resp.status}: ${resp.statusText}`); }
+            return resp.json();
+        } finally { clearTimeout(timer); }
     }
 
     private async apiPost(path: string, body: any): Promise<any> {
-        const resp = await fetch(`${GITHUB_API}${path}`, {
-            method: 'POST',
-            headers: this.headers(),
-            body: JSON.stringify(body)
-        });
-        if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(`GitHub API ${resp.status}: ${text.slice(0, 200)}`);
-        }
-        return resp.json();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), GitHubService.API_TIMEOUT_MS);
+        try {
+            const resp = await fetch(`${GITHUB_API}${path}`, {
+                method: 'POST',
+                headers: this.headers(),
+                body: JSON.stringify(body),
+                signal: controller.signal as any
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`GitHub API ${resp.status}: ${text.slice(0, 200)}`);
+            }
+            return resp.json();
+        } finally { clearTimeout(timer); }
     }
 
     private async apiPatch(path: string, body: any): Promise<any> {
-        const resp = await fetch(`${GITHUB_API}${path}`, {
-            method: 'PATCH',
-            headers: this.headers(),
-            body: JSON.stringify(body)
-        });
-        if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(`GitHub API ${resp.status}: ${text.slice(0, 200)}`);
-        }
-        return resp.json();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), GitHubService.API_TIMEOUT_MS);
+        try {
+            const resp = await fetch(`${GITHUB_API}${path}`, {
+                method: 'PATCH',
+                headers: this.headers(),
+                body: JSON.stringify(body),
+                signal: controller.signal as any
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`GitHub API ${resp.status}: ${text.slice(0, 200)}`);
+            }
+            return resp.json();
+        } finally { clearTimeout(timer); }
     }
 
     private async apiDelete(path: string): Promise<void> {
-        const resp = await fetch(`${GITHUB_API}${path}`, {
-            method: 'DELETE',
-            headers: this.headers()
-        });
-        if (!resp.ok) { throw new Error(`GitHub API ${resp.status}: ${resp.statusText}`); }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), GitHubService.API_TIMEOUT_MS);
+        try {
+            const resp = await fetch(`${GITHUB_API}${path}`, {
+                method: 'DELETE',
+                headers: this.headers(),
+                signal: controller.signal as any
+            });
+            if (!resp.ok) { throw new Error(`GitHub API ${resp.status}: ${resp.statusText}`); }
+        } finally { clearTimeout(timer); }
     }
 
     private headers(): Record<string, string> {

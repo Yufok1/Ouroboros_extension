@@ -416,11 +416,16 @@ export class NostrService {
     private dmSubId: string | undefined;
     private presenceSubId: string | undefined;
 
-    // User data
+    // User data (bounded for marathon sessions)
+    private static readonly MAX_PROFILES = 500;
+    private static readonly MAX_ZAP_TOTALS = 1000;
+    private static readonly MAX_REPUTATION = 2000;
+    private static readonly MAX_RELAY_RETRIES = 20;
     private blockedUsers: Set<string> = new Set();
     private profiles: Map<string, UserProfile> = new Map();
     private onlineUsers: Map<string, number> = new Map(); // pubkey -> last seen ts
     private reputation: Map<string, ReputationEntry> = new Map();
+    private _relayRetryCount: Map<string, number> = new Map();
     private context: vscode.ExtensionContext;
     private _privacy: PrivacySettings = {
         chatEnabled: true,
@@ -441,6 +446,18 @@ export class NostrService {
         // Load persisted reputation data
         const repSaved = context.globalState.get<Record<string, ReputationEntry>>('champion.reputation', {});
         for (const [k, v] of Object.entries(repSaved)) { this.reputation.set(k, v); }
+    }
+
+    // ── CACHE BOUNDING (marathon session hardening) ───────────────
+    /** Trim a Map to maxSize by evicting oldest entries (insertion order) */
+    private trimMap<V>(map: Map<string, V>, maxSize: number): void {
+        if (map.size <= maxSize) { return; }
+        const excess = map.size - maxSize;
+        const iter = map.keys();
+        for (let i = 0; i < excess; i++) {
+            const key = iter.next().value;
+            if (key !== undefined) { map.delete(key); }
+        }
     }
 
     // ——————————————————————————————————————————————————————————————————————————————————————————
@@ -529,6 +546,8 @@ export class NostrService {
     }
 
     private persistReputation(): void {
+        // Cap reputation entries before persisting (marathon session hardening)
+        this.trimMap(this.reputation, NostrService.MAX_REPUTATION);
         const obj: Record<string, ReputationEntry> = {};
         for (const [k, v] of this.reputation) { obj[k] = v; }
         this.context.globalState.update('champion.reputation', obj);
@@ -602,15 +621,18 @@ export class NostrService {
     // ——————————————————————————————————————————————————————————————————————————————————————————
 
     async setProfile(profile: UserProfile): Promise<NostrEvent> {
+        const current = this.profiles.get(this.publicKey) || {};
+        const patchEntries = Object.entries(profile || {}).filter(([_k, v]) => v !== undefined && v !== null);
+        const mergedProfile: UserProfile = { ...current, ...Object.fromEntries(patchEntries) };
         const event = await this.signEvent({
             pubkey: this.publicKey,
             created_at: Math.floor(Date.now() / 1000),
             kind: METADATA_KIND,
             tags: [],
-            content: JSON.stringify(profile)
+            content: JSON.stringify(mergedProfile)
         });
         await this.broadcast(event);
-        this.profiles.set(this.publicKey, profile);
+        this.profiles.set(this.publicKey, mergedProfile);
         return event;
     }
 
@@ -624,6 +646,45 @@ export class NostrService {
 
     getAllProfiles(): Map<string, UserProfile> {
         return new Map(this.profiles);
+    }
+
+    async fetchProfileFromRelays(pubkey: string, timeoutMs: number = 3500): Promise<UserProfile | null> {
+        if (!pubkey) { return null; }
+
+        return new Promise((resolve) => {
+            let settled = false;
+            let subId = '';
+            let timer: NodeJS.Timeout | undefined;
+
+            const done = (profile: UserProfile | null) => {
+                if (settled) { return; }
+                settled = true;
+                if (timer) { clearTimeout(timer); }
+                if (subId) { this.unsubscribe(subId); }
+                resolve(profile);
+            };
+
+            const cached = this.profiles.get(pubkey);
+            if (cached) {
+                done(cached);
+                return;
+            }
+
+            subId = this.subscribe({ kinds: [METADATA_KIND], authors: [pubkey], limit: 1 }, (event) => {
+                if (!event || event.kind !== METADATA_KIND || event.pubkey !== pubkey) { return; }
+                try {
+                    const profile = JSON.parse(event.content || '{}') as UserProfile;
+                    this.profiles.set(pubkey, profile);
+                    done(profile);
+                } catch {
+                    done(null);
+                }
+            });
+
+            timer = setTimeout(() => {
+                done(this.profiles.get(pubkey) || null);
+            }, timeoutMs);
+        });
     }
 
     // ——————————————————————————————————————————————————————————————————————————————————————————
@@ -643,6 +704,7 @@ export class NostrService {
 
             ws.on('open', () => {
                 console.log(`[Nostr] Connected to ${url}`);
+                this._relayRetryCount.delete(url); // reset retry count on success
                 this.relays.set(url, ws);
                 this._onRelayChange.fire(this.relays.size);
                 // Re-subscribe on reconnect
@@ -672,6 +734,7 @@ export class NostrService {
                             try {
                                 const profile = JSON.parse(event.content);
                                 this.profiles.set(event.pubkey, profile);
+                                this.trimMap(this.profiles, NostrService.MAX_PROFILES);
                             } catch { /* malformed profile */ }
                         }
                         // Handle DMs separately (decrypt)
@@ -697,7 +760,13 @@ export class NostrService {
                 console.log(`[Nostr] Disconnected from ${url}`);
                 this.relays.delete(url);
                 this._onRelayChange.fire(this.relays.size);
-                // Reconnect after 5s
+                // Reconnect after 5s (max retries to prevent infinite churn)
+                const retries = (this._relayRetryCount.get(url) || 0) + 1;
+                this._relayRetryCount.set(url, retries);
+                if (retries > NostrService.MAX_RELAY_RETRIES) {
+                    console.warn(`[Nostr] Relay ${url} exceeded ${NostrService.MAX_RELAY_RETRIES} retries — giving up`);
+                    return;
+                }
                 const timer = setTimeout(() => this.connectRelay(url), 5000);
                 this.reconnectTimers.set(url, timer);
             });
@@ -737,11 +806,12 @@ export class NostrService {
     }
 
     unsubscribe(subId: string): void {
+        const cb = this.subscriptions.get(subId);
         this.subscriptions.delete(subId);
         this.subscriptionFilters.delete(subId);
-        // Remove from eventCallbacks array is harder since we don't know the exact index easily 
-        // without reference, but for now we keep it simple.
-        // Ideally eventCallbacks should be a Map too.
+        if (cb) {
+            this.eventCallbacks = this.eventCallbacks.filter((fn) => fn !== cb);
+        }
         
         for (const [_url, ws] of this.relays) {
             this.sendToRelay(ws, JSON.stringify(['CLOSE', subId]));
@@ -1122,9 +1192,10 @@ export class NostrService {
             } catch { /* ignore parse errors */ }
         }
 
-        // Update totals
+        // Update totals (bounded)
         const current = this.zapTotals.get(eventId) || 0;
         this.zapTotals.set(eventId, current + Math.floor(amountMsats / 1000));
+        this.trimMap(this.zapTotals, NostrService.MAX_ZAP_TOTALS);
 
         // Award reputation to recipient
         const pTag = event.tags.find(t => t[0] === 'p');
@@ -1295,6 +1366,9 @@ export class NostrService {
             // Consider online if seen in last 5 minutes
             if (now - ts < 300) {
                 result.push({ pubkey, lastSeen: ts });
+            } else {
+                // Prune stale entries to prevent unbounded growth
+                this.onlineUsers.delete(pubkey);
             }
         }
         return result;

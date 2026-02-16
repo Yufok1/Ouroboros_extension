@@ -1,39 +1,75 @@
-# Dependencies & build
+# Build output
 node_modules/
 out/
 .vscode-test/
 *.vsix
-.vscode/
 
-# Secrets & logs
+# Secrets & runtime
 .env
 .mcp_server.log
+.mcp.json
 
-# Python
+# Python cache
 __pycache__/
 *.pyc
 
-# Generated images
-Gemini_Generated_Image_*.png
+# OS junk
+.DS_Store
+Thumbs.db
 
-# Source code — not for public GitHub
-src/
-media/
-scripts/
-esbuild.js
-champion_gen8.py
-resources/capsule.gz
-resources/icon_original.png
-resources/icon_small.png
-tsconfig.json
-package-lock.json
-.eslintrc.json
-.vscodeignore
-.vsixignore
-SETUP.md
+# IDE/agent working dirs
+.vscode/
+.claude/
+.kilocode/
+.kiro/
+.windsurf/
+.crush/
+.cascade_feed/
+
+# Generated exports
+felixbag-export-*
+bag_export.json
 
 # Dev artifacts
 *.bak
-claudeoctor.txt
+Gemini_Generated_Image_*.png
+
+# Research/planning docs (not part of the extension)
+PLAN.md
+SITUATION_REPORT.md
+MARKETPLACE_RELEASE.md
+SESSION_SUMMARY.md
+VISUAL_SUMMARY.md
 HANDOFF_REPORT.md
-.cascade_feed/
+ai_model_training_system_design.md
+automated_research_workflows.md
+direct_research_capability.md
+felix_bag_knowledge_organization.md
+kilo_code_task_*.md
+local_resources_catalog.md
+ourobouros_comprehensive_guide.md
+self_evolving_ai_research_assistant.md
+semantic_sensor_array.md
+system_integration_summary.md
+vast_gpu_enhancement_plan.md
+living_research_mind.md
+ALL_CASCADE_PATTERNS.md
+CASCADE_PATTERNS_TEST_REPORT.md
+ENTROPY_LOOP_SUMMARY.md
+GEMMA_RAG_CASCADE_SYSTEM.md
+MASTER_INDEX.md
+QUICK_START_GUIDE.md
+README_GEMMA_RAG.md
+CRYPTO_WEB3_FACILITY_MAP.md
+PLUGGABLE_INFERENCE_PROVIDER_SYSTEM.md
+SETUP.md
+
+# Misc legacy files
+claudeoctor.txt
+run_gemma_rag.py
+workflow_definition.json
+fix_champion.py
+quine_source.pdf
+vsix_extracted/
+vscode-extension/
+workflows/

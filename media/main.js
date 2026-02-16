@@ -13,6 +13,19 @@
     let _web3Categories = [];
     let _web3DocTypes = [];
     let _userDID = '';
+    let _toolSchemas = {}; // toolName -> {description, inputSchema}
+    let _pluggingSlots = {}; // slot index or name -> { modelId, startTime, requestId }
+    let _wfCatalog = [];
+    let _wfSelectedId = '';
+    let _wfLoadedDef = null;
+    let _wfLastExec = null;
+    let _wfCurrentExecutionId = '';
+    let _wfStatusPollTimer = null;
+    let _wfGraphMeta = null;
+    let _wfDrill = { kind: 'workflow', nodeId: '', edgeIndex: -1, workflowId: '' };
+    let _wfNodePositions = {};  // workflowId -> { nodeId -> {x, y} }
+    let _wfColorCache = {};     // workflowId -> '#rrggbb'
+    let _wfColorIndex = 0;
 
     // ── MESSAGE HANDLER ──
     window.addEventListener('message', function (e) {
@@ -28,8 +41,11 @@
                     }
                     updateHeader(msg);
                     updateCatBars(msg.categories);
-                    // Auto-retry catalog when server transitions to running
+                    // Auto-refresh when server transitions to running
                     if (msg.serverStatus === 'running' && prevStatus !== 'running') {
+                        // Refresh council slots from capsule
+                        callTool('list_slots', {});
+                        // Retry memory catalog if it failed during startup
                         var ml = document.getElementById('mem-list');
                         if (ml && (ml.innerText.indexOf('Loading...') !== -1 || ml.innerText.indexOf('ERROR') !== -1)) {
                             callTool('bag_catalog', {});
@@ -74,9 +90,11 @@
                     break;
                 case 'nostrError':
                     console.error('[Nostr]', msg.error);
+                    mpToast(msg.error || 'Nostr operation failed', 'error', 5000);
                     break;
                 case 'nostrWorkflowPublished':
                     if (msg.event) handleNostrEvent(msg.event);
+                    mpToast('Workflow published to marketplace', 'success', 2600);
                     break;
                 case 'nostrDM':
                     handleNostrDM(msg);
@@ -114,8 +132,18 @@
                 case 'nostrZapTotal':
                     if (msg.eventId) { _zapTotals[msg.eventId] = msg.total || 0; }
                     break;
+                case 'toolSchemas':
+                    if (Array.isArray(msg.tools)) {
+                        _toolSchemas = {};
+                        msg.tools.forEach(function (t) {
+                            if (t && t.name) _toolSchemas[t.name] = t;
+                        });
+                        buildToolsRegistry();
+                    }
+                    break;
                 case 'nostrDocumentPublished':
                     if (msg.event) handleNostrEvent(msg.event);
+                    mpToast((msg.docType || 'document') + ' published to marketplace', 'success', 2800);
                     break;
                 // ── WEB3 MESSAGES ──
                 case 'web3DID':
@@ -170,6 +198,15 @@
                 case 'githubMyGists':
                     handleMyGists(msg.gists);
                     break;
+                case 'gistSearchResults':
+                    handleGistSearchResults(msg);
+                    break;
+                case 'gistContentResult':
+                    handleGistContentResult(msg);
+                    break;
+                case 'gistIndexingComplete':
+                    handleGistIndexingComplete(msg);
+                    break;
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
                     break;
@@ -193,6 +230,30 @@
                 var memList = document.getElementById('mem-list');
                 if (memList && memList.innerText.indexOf('Loading...') !== -1) {
                     callTool('bag_catalog', {});
+                }
+            }
+
+            // Auto-fetch tool schemas when Tools tab is first opened
+            if (tab.dataset.tab === 'tools') {
+                if (Object.keys(_toolSchemas).length === 0) {
+                    vscode.postMessage({ command: 'fetchToolSchemas' });
+                }
+            }
+
+            // Auto-fetch workflows when the Workflows tab is first opened
+            if (tab.dataset.tab === 'workflows') {
+                if (_wfCatalog.length === 0) {
+                    callTool('workflow_list', {});
+                } else {
+                    renderWorkflowList();
+                    // Always re-fetch definition if cached _wfLoadedDef is missing or has no nodes
+                    if (_wfSelectedId && (!_wfLoadedDef || !Array.isArray(_wfLoadedDef.nodes) || _wfLoadedDef.nodes.length === 0)) {
+                        callTool('workflow_get', { workflow_id: _wfSelectedId });
+                    } else {
+                        renderWorkflowGraph(_wfLoadedDef, _wfLastExec ? _wfLastExec.node_states : null);
+                        renderWorkflowNodeStates(_wfLoadedDef, _wfLastExec ? _wfLastExec.node_states : null);
+                        _wfRenderDrillDetail();
+                    }
                 }
             }
         });
@@ -266,6 +327,22 @@
             setTimeout(function () { toast.classList.remove('show'); }, 1500);
         }
     }
+
+    function mpToast(message, kind, timeoutMs) {
+        var toast = document.getElementById('mp-toast');
+        if (!toast) return;
+        var type = kind || 'info';
+        toast.classList.remove('success', 'error', 'info', 'show');
+        toast.classList.add(type);
+        toast.textContent = message || '';
+        // restart CSS transition if another toast was visible
+        void toast.offsetWidth;
+        toast.classList.add('show');
+        clearTimeout(mpToast._timer);
+        mpToast._timer = setTimeout(function () {
+            toast.classList.remove('show');
+        }, timeoutMs || 2400);
+    }
     var copyConfigBtn = document.getElementById('copy-mcp-config');
     if (copyConfigBtn) copyConfigBtn.addEventListener('click', function () { _copyEl('mcp-config-block', 'config-copy-toast'); });
     var configBlock = document.getElementById('mcp-config-block');
@@ -318,8 +395,31 @@
         }
     }
 
+    function _isDefaultSlotName(name) {
+        var v = String(name || '').trim().toLowerCase();
+        return /^slot[_\-\s]?\d+$/.test(v) || v === 'empty' || v === 'vacant';
+    }
+
+    function _getSlotVisualState(slot) {
+        var rawStatus = String(slot && slot.status ? slot.status : '').trim().toLowerCase();
+        var hasModel = !!(slot && (slot.model_id || slot.model || slot.model_name || slot.model_source || slot._model_source));
+        var hasNamedTarget = !!(slot && slot.name) && !_isDefaultSlotName(slot.name);
+
+        if (rawStatus === 'loading' || rawStatus === 'plugging' || rawStatus === 'initializing' || rawStatus === 'starting' || rawStatus === 'pending') {
+            return 'plugging';
+        }
+        if (hasModel || rawStatus === 'ready' || rawStatus === 'plugged' || rawStatus === 'occupied' || rawStatus === 'active' || rawStatus === 'online' || rawStatus === 'running') {
+            return 'plugged';
+        }
+        if (hasNamedTarget) {
+            return 'plugging';
+        }
+        return 'empty';
+    }
+
     // ── SLOTS RENDER ──
     function renderSlots(data) {
+        _lastSlotsData = data;
         var grid = document.getElementById('slots-grid');
         if (!grid) return;
         grid.innerHTML = '';
@@ -334,19 +434,81 @@
             slotsArr = d.slots || d || [];
         } catch (err) { slotsArr = []; }
 
-        for (var i = 0; i < 8; i++) {
+        var slotCount = slotsArr.length;
+        var gridTitle = document.getElementById('council-grid-title');
+        if (slotCount > 0) {
+            gridTitle && (gridTitle.textContent = slotCount + '-SLOT COUNCIL GRID');
+        } else {
+            gridTitle && (gridTitle.textContent = 'COUNCIL GRID — awaiting capsule...');
+            return; // Don't render empty placeholder slots
+        }
+
+        // Build a lookup of which slots are currently being plugged
+        var pluggingBySlot = {};
+        var plugKeys = Object.keys(_pluggingSlots);
+        for (var pk = 0; pk < plugKeys.length; pk++) {
+            var pInfo = _pluggingSlots[plugKeys[pk]];
+            // Match by slot name or assign to first empty slot
+            if (pInfo.slotIndex !== undefined) {
+                pluggingBySlot[pInfo.slotIndex] = pInfo;
+            } else if (pInfo.slotName) {
+                // Find slot by name match
+                for (var si = 0; si < slotsArr.length; si++) {
+                    var sn = slotsArr[si];
+                    if (sn && (sn.name === pInfo.slotName || sn.slot_name === pInfo.slotName)) {
+                        pluggingBySlot[si] = pInfo;
+                        break;
+                    }
+                }
+                // If no name match, assign to first empty
+                if (!pluggingBySlot[Object.keys(pluggingBySlot).length]) {
+                    for (var si2 = 0; si2 < slotsArr.length; si2++) {
+                        if (!pluggingBySlot[si2] && _getSlotVisualState(slotsArr[si2] || {}) === 'empty') {
+                            pluggingBySlot[si2] = pInfo;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // No slot name — assign to first empty slot not already claimed
+                for (var si3 = 0; si3 < slotsArr.length; si3++) {
+                    if (!pluggingBySlot[si3] && _getSlotVisualState(slotsArr[si3] || {}) === 'empty') {
+                        pluggingBySlot[si3] = pInfo;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (var i = 0; i < slotCount; i++) {
             var slot = slotsArr[i] || {};
-            var occupied = slot.model_id || slot.status === 'ready';
+            var state = _getSlotVisualState(slot);
+            var isActivelyPlugging = !!pluggingBySlot[i];
+            var occupied = state === 'plugged';
+            var plugging = state === 'plugging' || isActivelyPlugging;
+            var statusText = occupied ? 'PLUGGED' : (plugging ? 'PLUGGING' : 'EMPTY');
+            var dotClass = occupied ? 'green' : (plugging ? 'amber pulse' : 'off');
+            var detailText = slot.model_type || slot.type || (slot.status ? ('status: ' + String(slot.status).toUpperCase()) : '--');
             var card = document.createElement('div');
-            card.className = 'slot-card' + (occupied ? ' occupied' : '');
+            card.className = 'slot-card state-' + state + (occupied ? ' occupied' : '') + (plugging ? ' plugging' : '');
 
             var html = '<div class="slot-num">' + (i + 1) + '</div>' +
                 '<div class="slot-status-line">' +
-                '<span class="dot ' + (occupied ? 'green' : 'off') + '"></span> ' +
-                (occupied ? 'OCCUPIED' : 'EMPTY') +
-                '</div>' +
-                '<div class="slot-model-name">' + (slot.model_id || slot.name || 'VACANT') + '</div>' +
-                '<div class="slot-detail">' + (slot.model_type || slot.type || '--') + '</div>';
+                '<span class="dot ' + dotClass + '"></span> ' +
+                '<span class="slot-status-badge ' + state + '">' + statusText + '</span>' +
+                '</div>';
+
+            if (isActivelyPlugging) {
+                var pInfo = pluggingBySlot[i];
+                var elapsed = Math.round((Date.now() - pInfo.startTime) / 1000);
+                html += '<div class="slot-model-name" style="color:var(--amber)">' + escHtml(pInfo.modelId) + '</div>';
+                var phaseText = pInfo.phase ? escHtml(pInfo.phase.substring(0, 60)) : 'Loading...';
+                html += '<div class="slot-detail">' + phaseText + ' (' + elapsed + 's)</div>';
+                html += '<div class="plug-bar"><div class="plug-bar-fill"></div></div>';
+            } else {
+                html += '<div class="slot-model-name">' + (slot.model_id || slot.name || 'VACANT') + '</div>';
+                html += '<div class="slot-detail">' + detailText + '</div>';
+            }
 
             if (occupied) {
                 html += '<div class="slot-actions">';
@@ -360,22 +522,95 @@
         }
 
         // Event delegation for slot buttons
-        grid.addEventListener('click', function (e) {
-            var btn = e.target.closest('[data-action]');
-            if (!btn) return;
-            var action = btn.dataset.action;
-            var slot = parseInt(btn.dataset.slot);
-            if (action === 'unplug') callTool('unplug_slot', { slot: slot });
-            else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
-            else if (action === 'clone') callTool('clone_slot', { slot: slot });
-        });
+        if (!grid.dataset.actionsBound) {
+            grid.addEventListener('click', function (e) {
+                var btn = e.target.closest('[data-action]');
+                if (!btn) return;
+                var action = btn.dataset.action;
+                var slot = parseInt(btn.dataset.slot);
+                if (action === 'unplug') callTool('unplug_slot', { slot: slot });
+                else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
+                else if (action === 'clone') callTool('clone_slot', { slot: slot });
+            });
+            grid.dataset.actionsBound = '1';
+        }
+    }
+
+    // ── PLUG LOADING UI ──
+    var _plugTimer = null;
+    var _lastSlotsData = null; // cache last slots data for re-render during plug
+
+    function _updatePluggingUI() {
+        var keys = Object.keys(_pluggingSlots);
+        if (keys.length === 0) {
+            if (_plugTimer) { clearInterval(_plugTimer); _plugTimer = null; }
+            return;
+        }
+
+        // Re-render slot grid to update elapsed timers on slot cards
+        if (_lastSlotsData) {
+            renderSlots(_lastSlotsData);
+        }
+
+        // Start timer to tick elapsed on slot cards
+        if (!_plugTimer) {
+            _plugTimer = setInterval(function () {
+                if (Object.keys(_pluggingSlots).length === 0) {
+                    clearInterval(_plugTimer); _plugTimer = null;
+                    return;
+                }
+                _updatePluggingUI();
+            }, 1000);
+        }
+    }
+
+    // Clear plugging state when plug_model/hub_plug result arrives
+    function _clearPluggingState() {
+        _pluggingSlots = {};
+        if (_plugTimer) { clearInterval(_plugTimer); _plugTimer = null; }
     }
 
     // ── ACTIVITY FEED ──
+    var PLUG_TOOLS = ['plug_model', 'hub_plug'];
     function addActivityEntry(event) {
         if (!event) return;
+
+        // Detect plug operations starting (durationMs === -1 sentinel)
+        if (PLUG_TOOLS.indexOf(event.tool) >= 0 && event.durationMs === -1) {
+            var modelId = (event.args && (event.args.model_id || event.args.summary)) || 'model';
+            var slotName = (event.args && event.args.slot_name) || null;
+            var slotKey = slotName || 'plug_' + Date.now();
+            _pluggingSlots[slotKey] = { modelId: modelId, startTime: event.timestamp || Date.now(), slotName: slotName };
+            _updatePluggingUI();
+            return; // Don't add "started" sentinel to the activity log
+        }
+
+        // Live progress updates during plug (durationMs === -2 sentinel)
+        if (event.tool === '_plug_progress' && event.durationMs === -2) {
+            var keys = Object.keys(_pluggingSlots);
+            if (keys.length > 0) {
+                var info = _pluggingSlots[keys[0]];
+                if (info && event.args) {
+                    info.phase = event.args.progress || '';
+                    if (event.args.model_id) info.modelId = event.args.model_id;
+                }
+                _updatePluggingUI();
+            }
+            return; // Don't add progress ticks to activity log
+        }
+
+        // Detect plug operations completing
+        if (PLUG_TOOLS.indexOf(event.tool) >= 0 && event.durationMs >= 0) {
+            _clearPluggingState();
+            // Auto-refresh slots to show the newly plugged model
+            callTool('list_slots', {});
+        }
+
         _activityLog.push(event);
         if (_activityLog.length > 500) _activityLog = _activityLog.slice(-500);
+        if (event.tool === 'workflow_execute' || event.tool === 'workflow_status') {
+            handleWorkflowActivity(event);
+        }
         renderActivityFeed();
     }
 
@@ -400,29 +635,45 @@
         var recent = filtered.slice(-50).reverse();
         feed.innerHTML = recent.map(function (e) {
             var ts = new Date(e.timestamp).toLocaleTimeString();
+            var fullTs = new Date(e.timestamp).toISOString();
             var hasError = !!e.error;
             var source = e.source || 'extension';
+
+            // Build rich detail sections
             var detail = '';
-            if (hasError) detail += 'ERROR: ' + e.error + '\n\n';
-            detail += 'SOURCE: ' + source + '\n';
-            detail += 'ARGS: ' + JSON.stringify(e.args, null, 2);
+            detail += '<div class="ad-section"><span class="ad-label">Timestamp</span>\n' + fullTs + '</div>';
+            detail += '<div class="ad-section"><span class="ad-label">Source</span>\n' + esc(source) + '</div>';
+            detail += '<div class="ad-section"><span class="ad-label">Category</span>\n' + esc(e.category || 'unknown') + '</div>';
+            detail += '<div class="ad-section"><span class="ad-label">Duration</span>\n' + (e.durationMs || 0) + 'ms</div>';
+            if (hasError) {
+                detail += '<div class="ad-section" style="color:var(--red)"><span class="ad-label">Error</span>\n' + esc(e.error) + '</div>';
+            }
+            if (e.args && Object.keys(e.args).length > 0) {
+                detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\n' + esc(JSON.stringify(e.args, null, 2)) + '</div>';
+            } else {
+                detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\nNone</div>';
+            }
             if (e.result) {
                 var resultStr = typeof e.result === 'string' ? e.result : JSON.stringify(e.result, null, 2);
-                detail += '\n\nRESULT: ' + resultStr.substring(0, 2000);
+                detail += '<div class="ad-section"><span class="ad-label">Result</span>\n' + esc(resultStr.substring(0, 4000)) + '</div>';
             }
+
             var sourceBadge = source === 'external'
                 ? '<span class="activity-cat" style="border-color:var(--blue);color:var(--blue);">EXTERNAL</span>'
                 : '';
-            return '<div class="activity-entry">' +
+            return '<div class="activity-entry" onclick="this.classList.toggle(\'expanded\')">' +
                 '<span class="activity-ts">' + ts + '</span> ' +
-                '<span class="activity-tool">' + e.tool + '</span>' +
-                '<span class="activity-cat">' + e.category + '</span>' +
+                '<span class="activity-tool">' + esc(e.tool) + '</span>' +
+                '<span class="activity-cat">' + esc(e.category) + '</span>' +
                 sourceBadge +
                 '<span class="activity-duration">' + (e.durationMs || 0) + 'ms</span>' +
                 (hasError ? ' <span style="color:var(--red);">ERR</span>' : '') +
-                '<pre class="activity-detail">' + detail.replace(/</g, '&lt;') + '</pre>' +
+                '<span class="activity-expand-hint">click to expand</span>' +
+                '<pre class="activity-detail">' + detail + '</pre>' +
                 '</div>';
         }).join('');
+
+        function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
     }
 
     var activityFilterEl = document.getElementById('activity-filter');
@@ -645,6 +896,7 @@
 
     var MEMORY_TOOLS = ['bag_catalog', 'bag_search', 'bag_get', 'bag_export', 'bag_induct', 'bag_forget', 'bag_put', 'pocket', 'summon', 'materialize', 'get_cached'];
     var COUNCIL_TOOLS = ['council_status', 'all_slots', 'broadcast', 'council_broadcast', 'set_consensus', 'debate', 'chain', 'slot_info', 'get_slot_params', 'invoke_slot', 'plug_model', 'unplug_slot', 'clone_slot', 'mu'+'tate_slot', 'rename_slot', 'swap_slots', 'hub_plug', 'cu'+'ll_slot'];
+    var WORKFLOW_TOOLS = ['workflow_list', 'workflow_get', 'workflow_execute', 'workflow_status'];
 
     function parseToolData(data) {
         if (data && data.content && Array.isArray(data.content) && data.content[0] && data.content[0].text) {
@@ -665,6 +917,817 @@
         if (n < 1024) return n + ' B';
         if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
         return (n / 1048576).toFixed(1) + ' MB';
+    }
+
+    // ── WORKFLOWS TAB (MCP) ──
+    function _wfParsePayload(raw) {
+        if (raw == null) return null;
+        var data = raw;
+        if (typeof data === 'string') {
+            try { data = JSON.parse(data); } catch (e) { return null; }
+        }
+        if (data && data.content && Array.isArray(data.content) && data.content[0] && typeof data.content[0].text === 'string') {
+            try { return JSON.parse(data.content[0].text); } catch (e2) { return null; }
+        }
+        return data;
+    }
+
+    function _wfNormalizeStatus(status) {
+        var s = String(status || '').toLowerCase();
+        if (s === 'success') s = 'completed';
+        if (s === 'error') s = 'failed';
+        if (s === 'in_progress') s = 'running';
+        if (s !== 'completed' && s !== 'running' && s !== 'failed' && s !== 'skipped') s = 'pending';
+        return s;
+    }
+
+    // ── WORKFLOW IDENTITY COLOR (Golden Angle HSV) ──
+    function _wfWorkflowColor(workflowId) {
+        if (!workflowId) return '#4d5d78';
+        if (_wfColorCache[workflowId]) return _wfColorCache[workflowId];
+        var idx = _wfColorIndex++;
+        var hue = (idx * 137.508) % 360;
+        var s = 0.65, v = 0.75;
+        var h = hue / 60, i = Math.floor(h), f = h - i;
+        var p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+        var r, g, b;
+        switch (i % 6) {
+            case 0: r=v; g=t; b=p; break;
+            case 1: r=q; g=v; b=p; break;
+            case 2: r=p; g=v; b=t; break;
+            case 3: r=p; g=q; b=v; break;
+            case 4: r=t; g=p; b=v; break;
+            default: r=v; g=p; b=q; break;
+        }
+        var hex = function(n) { var x = Math.round(n*255).toString(16); return x.length<2?'0'+x:x; };
+        var color = '#' + hex(r) + hex(g) + hex(b);
+        _wfColorCache[workflowId] = color;
+        return color;
+    }
+
+    function _wfSetExecStatus(message, isError) {
+        var el = document.getElementById('wfops-exec-status');
+        if (!el) return;
+        el.style.color = isError ? 'var(--red)' : 'var(--text)';
+        el.textContent = message || '';
+    }
+
+    function _wfSetBadge(status, label) {
+        var badge = document.getElementById('wfops-running-badge');
+        if (!badge) return;
+        badge.classList.remove('running', 'completed', 'failed');
+        if (status === 'idle') {
+            badge.textContent = label || 'IDLE';
+            return;
+        }
+        var s = _wfNormalizeStatus(status);
+        if (s === 'running' || s === 'completed' || s === 'failed') {
+            badge.classList.add(s);
+        }
+        badge.textContent = label || s.toUpperCase();
+    }
+
+    function _wfStopPolling() {
+        if (_wfStatusPollTimer) {
+            clearInterval(_wfStatusPollTimer);
+            _wfStatusPollTimer = null;
+        }
+    }
+
+    function _wfStartPolling(executionId) {
+        if (!executionId) return;
+        _wfStopPolling();
+        _wfCurrentExecutionId = executionId;
+        var attempts = 0;
+        _wfStatusPollTimer = setInterval(function () {
+            attempts += 1;
+            callTool('workflow_status', { execution_id: executionId });
+            if (attempts >= 30) {
+                _wfStopPolling();
+            }
+        }, 1500);
+    }
+
+    function _wfNodeMapFromWorkflow(workflow) {
+        var map = {};
+        if (!workflow || !Array.isArray(workflow.nodes)) return map;
+        workflow.nodes.forEach(function (node, idx) {
+            var nodeId = String((node && node.id != null) ? node.id : ('node_' + String(idx + 1)));
+            map[nodeId] = node || {};
+        });
+        return map;
+    }
+
+    function _wfTypeStats(nodes) {
+        var stats = {};
+        (nodes || []).forEach(function (node) {
+            var type = String((node && node.type) || 'node');
+            stats[type] = (stats[type] || 0) + 1;
+        });
+        return stats;
+    }
+
+    function _wfExtractRefs(value, sink) {
+        if (value == null || !sink) return;
+        if (typeof value === 'string') {
+            var refs = value.match(/\$[a-zA-Z_][a-zA-Z0-9_.]*/g) || [];
+            refs.forEach(function (r) { sink[r] = 1; });
+            var m;
+            var tpl = /\{\{([^}]+)\}\}/g;
+            while ((m = tpl.exec(value)) !== null) {
+                if (m && m[1] && m[1].trim()) sink['{{' + m[1].trim() + '}}'] = 1;
+            }
+            return;
+        }
+        if (Array.isArray(value)) {
+            value.forEach(function (v) { _wfExtractRefs(v, sink); });
+            return;
+        }
+        if (typeof value === 'object') {
+            Object.keys(value).forEach(function (k) {
+                _wfExtractRefs(value[k], sink);
+            });
+        }
+    }
+
+    function _wfJsonBlock(title, data) {
+        if (data == null) return '';
+        if (typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 0) return '';
+        var text = '';
+        try { text = JSON.stringify(data, null, 2); } catch (e) { text = String(data); }
+        return '<div class="wfops-json">' +
+            '<div class="wfops-subhead">' + _esc(title) + '</div>' +
+            '<pre>' + _esc(text) + '</pre>' +
+            '</div>';
+    }
+
+    function _wfSetDetailKindLabel(kind) {
+        var el = document.getElementById('wfops-detail-kind');
+        if (!el) return;
+        el.textContent = String(kind || 'workflow').toUpperCase();
+    }
+
+    function _wfRenderDrillEmpty(message) {
+        var detailEl = document.getElementById('wfops-detail');
+        if (!detailEl) return;
+        _wfSetDetailKindLabel('workflow');
+        detailEl.innerHTML = '<div class="wfops-detail-empty">' + _esc(message || 'Select a workflow, node, or connection to inspect details.') + '</div>';
+    }
+
+    function _wfCurrentNodeStates() {
+        if (!_wfLastExec || !_wfLoadedDef) return null;
+        var loadedId = String(_wfLoadedDef.id || _wfSelectedId || '');
+        var execWorkflowId = String(_wfLastExec.workflow_id || '');
+        if (!loadedId || !execWorkflowId || loadedId !== execWorkflowId) return null;
+        return _wfLastExec.node_states || null;
+    }
+
+    function _wfEnsureDrillTarget() {
+        if (!_wfLoadedDef || !Array.isArray(_wfLoadedDef.nodes)) {
+            _wfDrill.kind = 'workflow';
+            _wfDrill.nodeId = '';
+            _wfDrill.edgeIndex = -1;
+            return;
+        }
+        var nodeMap = _wfNodeMapFromWorkflow(_wfLoadedDef);
+        if (_wfDrill.kind === 'node' && !nodeMap[_wfDrill.nodeId]) {
+            _wfDrill.kind = 'workflow';
+            _wfDrill.nodeId = '';
+            _wfDrill.edgeIndex = -1;
+            return;
+        }
+        var connLen = Array.isArray(_wfLoadedDef.connections) ? _wfLoadedDef.connections.length : 0;
+        if (_wfDrill.kind === 'connection' && (_wfDrill.edgeIndex < 0 || _wfDrill.edgeIndex >= connLen)) {
+            _wfDrill.kind = 'workflow';
+            _wfDrill.nodeId = '';
+            _wfDrill.edgeIndex = -1;
+        }
+    }
+
+    function _wfRenderDrillDetail() {
+        var detailEl = document.getElementById('wfops-detail');
+        if (!detailEl) return;
+
+        if (!_wfLoadedDef || !Array.isArray(_wfLoadedDef.nodes)) {
+            _wfRenderDrillEmpty('Select a workflow from the list to inspect metadata and resources.');
+            return;
+        }
+
+        _wfEnsureDrillTarget();
+
+        var workflowId = String(_wfLoadedDef.id || _wfSelectedId || 'workflow');
+        _wfDrill.workflowId = workflowId;
+        var nodeMap = _wfNodeMapFromWorkflow(_wfLoadedDef);
+        var execStates = _wfCurrentNodeStates() || {};
+        var kind = _wfDrill.kind || 'workflow';
+        var html = '';
+
+        if (kind === 'node') {
+            var nodeId = String(_wfDrill.nodeId || '');
+            var node = nodeMap[nodeId];
+            if (!node) {
+                _wfDrill.kind = 'workflow';
+                kind = 'workflow';
+            } else {
+                var stObj = execStates[nodeId] || {};
+                var incoming = (_wfGraphMeta && _wfGraphMeta.reverse && _wfGraphMeta.reverse[nodeId]) ? _wfGraphMeta.reverse[nodeId] : [];
+                var outgoing = (_wfGraphMeta && _wfGraphMeta.adjacency && _wfGraphMeta.adjacency[nodeId]) ? _wfGraphMeta.adjacency[nodeId] : [];
+                var params = node.parameters || node.config || {};
+                var refs = {};
+                _wfExtractRefs(params, refs);
+                var refList = Object.keys(refs).sort();
+                var resources = [];
+                if (String(node.type || '') === 'tool' && params.tool_name) {
+                    resources.push('tool:' + String(params.tool_name));
+                }
+                if (String(node.type || '') === 'http' && (params.method || params.url)) {
+                    resources.push('http:' + String(params.method || 'GET') + ' ' + String(params.url || ''));
+                }
+                refList.forEach(function (r) { resources.push('ref:' + r); });
+
+                html =
+                    '<div class="wfops-drill-title">' +
+                    '<span class="wfops-drill-name">' + _esc(nodeId) + '</span>' +
+                    '<span class="wfops-drill-pill">NODE</span>' +
+                    '</div>' +
+                    '<div class="wfops-kv-grid">' +
+                    '<div class="k">Type</div><div class="v">' + _esc(String(node.type || 'node')) + '</div>' +
+                    '<div class="k">Name</div><div class="v">' + _esc(String(node.name || node.label || nodeId)) + '</div>' +
+                    '<div class="k">Description</div><div class="v">' + _esc(String(node.description || '—')) + '</div>' +
+                    '<div class="k">Status</div><div class="v">' + _esc(_wfNormalizeStatus(stObj.status || 'pending')) + '</div>' +
+                    '<div class="k">Elapsed</div><div class="v">' + (typeof stObj.elapsed_ms === 'number' ? (String(stObj.elapsed_ms) + 'ms') : '—') + '</div>' +
+                    '<div class="k">Incoming</div><div class="v">' + String(incoming.length) + '</div>' +
+                    '<div class="k">Outgoing</div><div class="v">' + String(outgoing.length) + '</div>' +
+                    '</div>' +
+                    '<div class="wfops-subhead">Linked Nodes</div>' +
+                    '<div class="wfops-chip-row">' +
+                    (incoming.length ? incoming.map(function (id) { return '<span class="wfops-chip">IN: ' + _esc(id) + '</span>'; }).join('') : '<span class="wfops-chip">IN: none</span>') +
+                    (outgoing.length ? outgoing.map(function (id) { return '<span class="wfops-chip">OUT: ' + _esc(id) + '</span>'; }).join('') : '<span class="wfops-chip">OUT: none</span>') +
+                    '</div>' +
+                    '<div class="wfops-subhead">Resources & Expressions</div>' +
+                    '<div class="wfops-chip-row">' +
+                    (resources.length ? resources.map(function (r) { return '<span class="wfops-chip">' + _esc(r) + '</span>'; }).join('') : '<span class="wfops-chip">none</span>') +
+                    '</div>' +
+                    _wfJsonBlock('Node Parameters', params) +
+                    _wfJsonBlock('Last Node State', stObj);
+
+                _wfSetDetailKindLabel('node');
+                detailEl.innerHTML = html;
+                return;
+            }
+        }
+
+        if (kind === 'connection') {
+            var edge = (_wfGraphMeta && _wfGraphMeta.connections) ? _wfGraphMeta.connections[_wfDrill.edgeIndex] : null;
+            if (!edge) {
+                _wfDrill.kind = 'workflow';
+                kind = 'workflow';
+            } else {
+                var fromNode = nodeMap[edge.from] || {};
+                var toNode = nodeMap[edge.to] || {};
+                var toState = execStates[edge.to] || {};
+                html =
+                    '<div class="wfops-drill-title">' +
+                    '<span class="wfops-drill-name">' + _esc(edge.from + ' → ' + edge.to) + '</span>' +
+                    '<span class="wfops-drill-pill">CONNECTION</span>' +
+                    '</div>' +
+                    '<div class="wfops-kv-grid">' +
+                    '<div class="k">From Node</div><div class="v">' + _esc(edge.from) + ' (' + _esc(String(fromNode.type || 'node')) + ')</div>' +
+                    '<div class="k">To Node</div><div class="v">' + _esc(edge.to) + ' (' + _esc(String(toNode.type || 'node')) + ')</div>' +
+                    '<div class="k">Label</div><div class="v">' + _esc(edge.label || '—') + '</div>' +
+                    '<div class="k">Branch</div><div class="v">' + _esc(edge.branch || '—') + '</div>' +
+                    '<div class="k">Condition</div><div class="v">' + _esc(edge.condition || '—') + '</div>' +
+                    '<div class="k">Downstream Status</div><div class="v">' + _esc(_wfNormalizeStatus(toState.status || 'pending')) + '</div>' +
+                    '</div>' +
+                    _wfJsonBlock('Connection Payload', edge.raw || edge);
+
+                _wfSetDetailKindLabel('connection');
+                detailEl.innerHTML = html;
+                return;
+            }
+        }
+
+        var typeStats = _wfTypeStats(_wfLoadedDef.nodes || []);
+        var typeChips = Object.keys(typeStats).sort().map(function (type) {
+            return '<span class="wfops-chip">' + _esc(type) + ': ' + String(typeStats[type]) + '</span>';
+        }).join('');
+        var runStatus = (_wfLastExec && String(_wfLastExec.workflow_id || '') === workflowId)
+            ? _wfNormalizeStatus(_wfLastExec.status || 'pending')
+            : 'pending';
+
+        html =
+            '<div class="wfops-drill-title">' +
+            '<span class="wfops-drill-name">' + _esc(String(_wfLoadedDef.name || workflowId)) + '</span>' +
+            '<span class="wfops-drill-pill">WORKFLOW</span>' +
+            '</div>' +
+            '<div class="wfops-kv-grid">' +
+            '<div class="k">Workflow ID</div><div class="v">' + _esc(workflowId) + '</div>' +
+            '<div class="k">Version</div><div class="v">' + _esc(String(_wfLoadedDef.version || '—')) + '</div>' +
+            '<div class="k">Category</div><div class="v">' + _esc(String(_wfLoadedDef.category || '—')) + '</div>' +
+            '<div class="k">Description</div><div class="v">' + _esc(String(_wfLoadedDef.description || '—')) + '</div>' +
+            '<div class="k">Nodes</div><div class="v">' + String((_wfLoadedDef.nodes || []).length) + '</div>' +
+            '<div class="k">Connections</div><div class="v">' + String((_wfLoadedDef.connections || []).length) + '</div>' +
+            '<div class="k">Last Run</div><div class="v">' + _esc(runStatus) + '</div>' +
+            '<div class="k">Execution ID</div><div class="v">' + _esc(String((_wfLastExec && _wfLastExec.execution_id) || '—')) + '</div>' +
+            '</div>' +
+            '<div class="wfops-subhead">Node Type Composition</div>' +
+            '<div class="wfops-chip-row">' + (typeChips || '<span class="wfops-chip">none</span>') + '</div>' +
+            _wfJsonBlock('Workflow Config', _wfLoadedDef.config || {}) +
+            _wfJsonBlock('Workflow Metadata', _wfLoadedDef.metadata || {});
+
+        _wfSetDetailKindLabel('workflow');
+        detailEl.innerHTML = html;
+    }
+
+    function _wfSelectWorkflowDrill() {
+        _wfDrill.kind = 'workflow';
+        _wfDrill.nodeId = '';
+        _wfDrill.edgeIndex = -1;
+        var states = _wfCurrentNodeStates();
+        renderWorkflowGraph(_wfLoadedDef, states);
+        renderWorkflowNodeStates(_wfLoadedDef, states);
+        _wfRenderDrillDetail();
+    }
+
+    function _wfSelectNodeDrill(nodeId) {
+        _wfDrill.kind = 'node';
+        _wfDrill.nodeId = String(nodeId || '');
+        _wfDrill.edgeIndex = -1;
+        var states = _wfCurrentNodeStates();
+        renderWorkflowGraph(_wfLoadedDef, states);
+        renderWorkflowNodeStates(_wfLoadedDef, states);
+        _wfRenderDrillDetail();
+    }
+
+    function _wfSelectEdgeDrill(edgeIndex) {
+        _wfDrill.kind = 'connection';
+        _wfDrill.edgeIndex = Number(edgeIndex);
+        _wfDrill.nodeId = '';
+        var states = _wfCurrentNodeStates();
+        renderWorkflowGraph(_wfLoadedDef, states);
+        renderWorkflowNodeStates(_wfLoadedDef, states);
+        _wfRenderDrillDetail();
+    }
+
+    function renderWorkflowList() {
+        var listEl = document.getElementById('wfops-list');
+        if (!listEl) return;
+        var countEl = document.getElementById('wfops-count');
+        if (countEl) countEl.textContent = String(_wfCatalog.length);
+
+        if (!_wfCatalog.length) {
+            listEl.innerHTML = '<div class="wfops-item" style="color:var(--text-dim);cursor:default;">No workflows found. Click REFRESH LIST.</div>';
+            var selectedNone = document.getElementById('wfops-selected');
+            if (selectedNone) selectedNone.textContent = 'none';
+            return;
+        }
+
+        listEl.innerHTML = _wfCatalog.map(function (wf) {
+            var active = wf.id === _wfSelectedId ? ' active' : '';
+            var isExec = _wfLastExec && _wfNormalizeStatus(_wfLastExec.status) === 'running' &&
+                         (wf.id === _wfCurrentExecutionId || wf.id === _wfSelectedId);
+            var executing = isExec ? ' executing' : '';
+            var color = _wfWorkflowColor(wf.id);
+            var style = '--wf-color:' + color + ';border-left-color:' + color;
+            return '<div class="wfops-item' + active + executing + '" style="' + style + '" data-wfops-id="' + _esc(wf.id) + '">' +
+                '<div class="wfops-item-title">' + _esc(wf.name || wf.id) + '</div>' +
+                '<div class="wfops-item-meta">' +
+                '<span>' + _esc(wf.id) + '</span>' +
+                '<span>' + String(wf.node_count || 0) + ' nodes</span>' +
+                (wf.description ? '<span>' + _esc(wf.description) + '</span>' : '') +
+                '</div>' +
+                '</div>';
+        }).join('');
+
+        var selected = _wfCatalog.find(function (wf) { return wf.id === _wfSelectedId; });
+        var selectedEl = document.getElementById('wfops-selected');
+        if (selectedEl) {
+            selectedEl.textContent = selected ? (selected.name || selected.id) : 'none';
+        }
+    }
+
+    function renderWorkflowNodeStates(workflow, nodeStates) {
+        var panel = document.getElementById('wfops-node-status');
+        if (!panel) return;
+        if (!workflow || !Array.isArray(workflow.nodes) || workflow.nodes.length === 0) {
+            panel.innerHTML = '<div class="wfops-node-row"><span class="name">No workflow loaded.</span><span class="state pending">PENDING</span></div>';
+            return;
+        }
+
+        var states = nodeStates || {};
+        panel.innerHTML = workflow.nodes.map(function (node, idx) {
+            var nodeId = String((node && node.id != null) ? node.id : ('node_' + String(idx + 1)));
+            var stObj = states[nodeId] || {};
+            var st = _wfNormalizeStatus(stObj.status || 'pending');
+            var elapsed = typeof stObj.elapsed_ms === 'number' ? (' · ' + String(stObj.elapsed_ms) + 'ms') : '';
+            var active = (_wfDrill.kind === 'node' && _wfDrill.nodeId === nodeId) ? ' active' : '';
+            return '<div class="wfops-node-row' + active + '" data-wf-node-id="' + _esc(nodeId) + '">' +
+                '<span class="name">' + _esc(nodeId) + '</span>' +
+                '<span class="state ' + st + '">' + st.toUpperCase() + elapsed + '</span>' +
+                '</div>';
+        }).join('');
+    }
+
+    function renderWorkflowGraph(workflow, nodeStates) {
+        var svg = document.getElementById('wfops-graph');
+        if (!svg) return;
+        if (!workflow || !Array.isArray(workflow.nodes) || workflow.nodes.length === 0) {
+            _wfGraphMeta = null;
+            svg.setAttribute('viewBox', '0 0 820 360');
+            svg.innerHTML = '<text x="24" y="40" fill="#7a8aa5" font-size="13" font-family="monospace">Select a workflow to visualize.</text>';
+            return;
+        }
+
+        // Graph identity border
+        var graphWrap = document.querySelector('.wfops-graph-wrap');
+        if (graphWrap && workflow.id) {
+            var idColor = _wfWorkflowColor(String(workflow.id));
+            graphWrap.style.borderLeft = '3px solid ' + idColor;
+        }
+
+        var nodes = workflow.nodes.map(function (n, idx) {
+            var id = (n && n.id != null) ? String(n.id) : ('node_' + String(idx + 1));
+            return {
+                id: id,
+                type: String((n && n.type) || 'node'),
+                name: String((n && (n.name || n.label || n.tool)) || id)
+            };
+        });
+
+        var indegree = {};
+        var adjacency = {};
+        var reverse = {};
+        var nodeMap = {};
+        nodes.forEach(function (n) {
+            indegree[n.id] = 0;
+            adjacency[n.id] = [];
+            reverse[n.id] = [];
+            nodeMap[n.id] = n;
+        });
+
+        var connections = [];
+        var rawConnections = Array.isArray(workflow.connections) ? workflow.connections : [];
+        rawConnections.forEach(function (c) {
+            var from = (c && c.from != null) ? String(c.from) : '';
+            var to = (c && c.to != null) ? String(c.to) : '';
+            if (!adjacency[from] || indegree[to] === undefined) return;
+            adjacency[from].push(to);
+            reverse[to].push(from);
+            indegree[to] += 1;
+            connections.push({
+                index: connections.length,
+                from: from,
+                to: to,
+                label: c && c.label ? String(c.label) : '',
+                branch: c && c.branch ? String(c.branch) : '',
+                condition: c && c.condition ? String(c.condition) : '',
+                raw: c || {}
+            });
+        });
+
+        var level = {};
+        var queue = [];
+        nodes.forEach(function (n) {
+            if (indegree[n.id] === 0) {
+                level[n.id] = 0;
+                queue.push(n.id);
+            }
+        });
+        if (queue.length === 0 && nodes.length > 0) {
+            level[nodes[0].id] = 0;
+            queue.push(nodes[0].id);
+        }
+
+        while (queue.length > 0) {
+            var current = queue.shift();
+            var nexts = adjacency[current] || [];
+            for (var i = 0; i < nexts.length; i++) {
+                var next = nexts[i];
+                var nextLevel = (level[current] || 0) + 1;
+                if (level[next] == null || nextLevel > level[next]) {
+                    level[next] = nextLevel;
+                }
+                indegree[next] -= 1;
+                if (indegree[next] === 0) queue.push(next);
+            }
+        }
+        nodes.forEach(function (n) {
+            if (level[n.id] == null) level[n.id] = 0;
+        });
+
+        var columns = {};
+        var maxLevel = 0;
+        nodes.forEach(function (n) {
+            var l = level[n.id] || 0;
+            if (!columns[l]) columns[l] = [];
+            columns[l].push(n);
+            if (l > maxLevel) maxLevel = l;
+        });
+
+        var maxInColumn = 1;
+        for (var col = 0; col <= maxLevel; col++) {
+            var len = (columns[col] || []).length;
+            if (len > maxInColumn) maxInColumn = len;
+        }
+
+        var margin = 28;
+        var nodeW = 170;
+        var nodeH = 50;
+        var gapX = 70;
+        var gapY = 18;
+
+        var width = margin * 2 + ((maxLevel + 1) * nodeW) + (maxLevel * gapX);
+        var height = Math.max(320, margin * 2 + (maxInColumn * nodeH) + (Math.max(0, maxInColumn - 1) * gapY));
+        svg.setAttribute('viewBox', '0 0 ' + String(width) + ' ' + String(height));
+
+        var positions = {};
+        for (var lvl = 0; lvl <= maxLevel; lvl++) {
+            var colNodes = columns[lvl] || [];
+            var colHeight = (colNodes.length * nodeH) + (Math.max(0, colNodes.length - 1) * gapY);
+            var startY = margin + Math.max(0, (height - margin * 2 - colHeight) / 2);
+            var x = margin + (lvl * (nodeW + gapX));
+            for (var ni = 0; ni < colNodes.length; ni++) {
+                positions[colNodes[ni].id] = { x: x, y: startY + (ni * (nodeH + gapY)) };
+            }
+        }
+
+        // Merge saved drag positions
+        var wfKey = workflow.id ? String(workflow.id) : '_default';
+        var savedPos = _wfNodePositions[wfKey] || {};
+        Object.keys(savedPos).forEach(function (nid) {
+            if (positions[nid]) positions[nid] = savedPos[nid];
+        });
+
+        var nodeStateMap = nodeStates || {};
+        var palette = {
+            completed: { fill: '#123d2c', stroke: '#00ff88' },
+            running: { fill: '#3f2e06', stroke: '#ffaa00' },
+            failed: { fill: '#3d1717', stroke: '#ff4444' },
+            skipped: { fill: '#2e2e35', stroke: '#8b8b8b' },
+            pending: { fill: '#1f2b42', stroke: '#4d5d78' }
+        };
+
+        var edgesSvg = connections.map(function (edge) {
+            var a = positions[edge.from];
+            var b = positions[edge.to];
+            if (!a || !b) return '';
+
+            var sx = a.x + nodeW;
+            var sy = a.y + (nodeH / 2);
+            var tx = b.x;
+            var ty = b.y + (nodeH / 2);
+            var dx = Math.max(36, (tx - sx) * 0.45);
+            var path = 'M ' + sx + ' ' + sy + ' C ' + (sx + dx) + ' ' + sy + ', ' + (tx - dx) + ' ' + ty + ', ' + tx + ' ' + ty;
+            var selected = (_wfDrill.kind === 'connection' && _wfDrill.edgeIndex === edge.index);
+
+            // Active edge: wavefront crossing this connection
+            var edgeActive = false;
+            if (nodeStates) {
+                var fromSt = _wfNormalizeStatus((nodeStateMap[edge.from] || {}).status || 'pending');
+                var toSt = _wfNormalizeStatus((nodeStateMap[edge.to] || {}).status || 'pending');
+                edgeActive = (fromSt === 'completed' && toSt === 'running') || (fromSt === 'running');
+            }
+
+            var stroke = edgeActive ? '#ffaa00' : (selected ? '#8cc8ff' : '#5d6f8f');
+            var width = edgeActive ? '2.0' : (selected ? '2.2' : '1.4');
+            var marker = edgeActive ? 'url(#wf-arrow-active)' : 'url(#wf-arrow)';
+            var edgeClass = edgeActive ? ' class="wf-edge-active"' : '';
+            var label = '';
+            if (edge.label) {
+                var lx = (sx + tx) / 2;
+                var ly = (sy + ty) / 2 - 6;
+                label = '<text x="' + lx + '" y="' + ly + '" fill="#8fa0bb" font-size="9" text-anchor="middle" font-family="monospace" data-wf-edge-index="' + String(edge.index) + '" style="cursor:pointer;">' + _esc(edge.label) + '</text>';
+            }
+            return '<g>' +
+                '<path d="' + path + '" stroke="transparent" stroke-width="10" fill="none" data-wf-edge-index="' + String(edge.index) + '" style="cursor:pointer;"/>' +
+                '<path d="' + path + '" stroke="' + stroke + '" stroke-width="' + width + '" fill="none" marker-end="' + marker + '" opacity="0.95"' + edgeClass + ' data-wf-edge-index="' + String(edge.index) + '" style="cursor:pointer;"/>' +
+                label +
+                '</g>';
+        }).join('');
+
+        var nodesSvg = nodes.map(function (node) {
+            var pos = positions[node.id];
+            if (!pos) return '';
+
+            var stObj = nodeStateMap[node.id] || {};
+            var st = _wfNormalizeStatus(stObj.status || 'pending');
+            var colors = palette[st] || palette.pending;
+            var name = node.name.length > 20 ? (node.name.substring(0, 17) + '...') : node.name;
+            var nid = node.id.length > 22 ? (node.id.substring(0, 19) + '...') : node.id;
+            var elapsed = typeof stObj.elapsed_ms === 'number' ? (String(stObj.elapsed_ms) + 'ms') : '';
+            var active = (_wfDrill.kind === 'node' && _wfDrill.nodeId === node.id);
+            var stroke = active ? '#8cc8ff' : colors.stroke;
+            var strokeW = active ? '2.4' : '1.5';
+
+            var animClass = '';
+            if (nodeStates) {
+                if (st === 'running') animClass = ' wf-node-running';
+                else if (st === 'completed') animClass = ' wf-node-completing';
+                else if (st === 'failed') animClass = ' wf-node-failed';
+            }
+
+            return '<g data-wf-node-id="' + _esc(node.id) + '" class="' + animClass.trim() + '" style="cursor:pointer;" transform="translate(0,0)">' +
+                '<rect x="' + pos.x + '" y="' + pos.y + '" width="' + nodeW + '" height="' + nodeH + '" rx="6" fill="' + colors.fill + '" stroke="' + stroke + '" stroke-width="' + strokeW + '"/>' +
+                '<text x="' + (pos.x + 10) + '" y="' + (pos.y + 18) + '" fill="#dfe9f8" font-size="10" font-family="monospace">' + _esc(name) + '</text>' +
+                '<text x="' + (pos.x + 10) + '" y="' + (pos.y + 33) + '" fill="#93a4bf" font-size="9" font-family="monospace">' + _esc(node.type) + ' · ' + _esc(nid) + '</text>' +
+                '<text x="' + (pos.x + nodeW - 10) + '" y="' + (pos.y + 18) + '" fill="' + colors.stroke + '" font-size="8" text-anchor="end" font-family="monospace">' + st.toUpperCase() + '</text>' +
+                (elapsed ? '<text x="' + (pos.x + nodeW - 10) + '" y="' + (pos.y + 33) + '" fill="#93a4bf" font-size="8" text-anchor="end" font-family="monospace">' + _esc(elapsed) + '</text>' : '') +
+                '</g>';
+        }).join('');
+
+        _wfGraphMeta = {
+            nodeMap: nodeMap,
+            nodes: nodes,
+            connections: connections,
+            adjacency: adjacency,
+            reverse: reverse,
+            positions: positions
+        };
+
+        svg.innerHTML =
+            '<defs>' +
+            '<marker id="wf-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">' +
+            '<path d="M0,0 L8,3 L0,6 z" fill="#5d6f8f"></path>' +
+            '</marker>' +
+            '<marker id="wf-arrow-active" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">' +
+            '<path d="M0,0 L8,3 L0,6 z" fill="#ffaa00"></path>' +
+            '</marker>' +
+            '</defs>' +
+            edgesSvg +
+            nodesSvg;
+    }
+
+    function _wfRenderExecution(payload) {
+        if (!payload || typeof payload !== 'object') return;
+        _wfLastExec = payload;
+
+        if (payload.workflow_id && (!_wfSelectedId || _wfSelectedId !== payload.workflow_id)) {
+            _wfSelectedId = payload.workflow_id;
+            renderWorkflowList();
+        }
+        if (payload.execution_id) {
+            _wfCurrentExecutionId = payload.execution_id;
+        }
+        if (payload.workflow_id && (!_wfLoadedDef || _wfLoadedDef.id !== payload.workflow_id)) {
+            callTool('workflow_get', { workflow_id: payload.workflow_id });
+        }
+
+        var status = _wfNormalizeStatus(payload.status || 'pending');
+        if (status === 'running') {
+            _wfSetBadge('running', 'RUNNING · ' + (_wfCurrentExecutionId || '...'));
+            if (_wfCurrentExecutionId) _wfStartPolling(_wfCurrentExecutionId);
+        } else if (status === 'completed') {
+            _wfSetBadge('completed', 'COMPLETED');
+            _wfStopPolling();
+        } else if (status === 'failed') {
+            _wfSetBadge('failed', 'FAILED');
+            _wfStopPolling();
+        } else {
+            _wfSetBadge('idle', 'IDLE');
+        }
+
+        var lines = [];
+        if (payload.workflow_id) lines.push('Workflow: ' + payload.workflow_id);
+        if (payload.execution_id) lines.push('Execution: ' + payload.execution_id);
+        lines.push('Status: ' + String(payload.status || 'unknown').toUpperCase());
+        if (typeof payload.elapsed_ms === 'number') lines.push('Elapsed: ' + String(payload.elapsed_ms) + 'ms');
+        if (payload.error) lines.push('Error: ' + payload.error);
+        _wfSetExecStatus(lines.join('\n'), !!payload.error || status === 'failed');
+
+        renderWorkflowNodeStates(_wfLoadedDef, payload.node_states || null);
+        renderWorkflowGraph(_wfLoadedDef, payload.node_states || null);
+        renderWorkflowList(); // Update executing highlight on every poll
+        _wfRenderDrillDetail();
+    }
+
+    function handleWorkflowToolResult(toolName, msg, rawText) {
+        var payload = msg.error ? null : _wfParsePayload(rawText);
+
+        if (toolName === 'workflow_list') {
+            if (msg.error) {
+                _wfSetExecStatus('workflow_list failed: ' + msg.error, true);
+                return;
+            }
+            var list = [];
+            if (payload && Array.isArray(payload.workflows)) list = payload.workflows;
+            else if (Array.isArray(payload)) list = payload;
+
+            _wfCatalog = list.map(function (w, idx) {
+                var id = String((w && (w.id || w.workflow_id || w.name)) || ('workflow_' + String(idx + 1)));
+                return {
+                    id: id,
+                    name: String((w && (w.name || w.id || w.workflow_id)) || id),
+                    description: String((w && w.description) || ''),
+                    node_count: typeof (w && w.node_count) === 'number'
+                        ? w.node_count
+                        : (Array.isArray(w && w.nodes) ? w.nodes.length : 0)
+                };
+            });
+
+            if (_wfCatalog.length > 0) {
+                var exists = _wfCatalog.some(function (w) { return w.id === _wfSelectedId; });
+                if (!exists) _wfSelectedId = _wfCatalog[0].id;
+            } else {
+                _wfSelectedId = '';
+                _wfLoadedDef = null;
+                _wfGraphMeta = null;
+                _wfDrill = { kind: 'workflow', nodeId: '', edgeIndex: -1, workflowId: '' };
+            }
+
+            renderWorkflowList();
+            if (_wfSelectedId && (!_wfLoadedDef || _wfLoadedDef.id !== _wfSelectedId)) {
+                callTool('workflow_get', { workflow_id: _wfSelectedId });
+            } else if (!_wfSelectedId) {
+                renderWorkflowGraph(null, null);
+                renderWorkflowNodeStates(null, null);
+                _wfRenderDrillDetail();
+            }
+            _wfSetExecStatus('Loaded ' + String(_wfCatalog.length) + ' workflows.', false);
+            return;
+        }
+
+        if (toolName === 'workflow_get') {
+            if (msg.error) {
+                _wfSetExecStatus('workflow_get failed: ' + msg.error, true);
+                return;
+            }
+            if (payload && payload.error) {
+                _wfSetExecStatus('workflow_get failed: ' + payload.error, true);
+                return;
+            }
+            if (!payload || !Array.isArray(payload.nodes)) {
+                _wfSetExecStatus('workflow_get returned invalid workflow definition.', true);
+                return;
+            }
+
+            var prevWorkflowId = _wfLoadedDef && _wfLoadedDef.id ? String(_wfLoadedDef.id) : '';
+            _wfLoadedDef = payload;
+            if (payload.id) _wfSelectedId = String(payload.id);
+            var loadedWorkflowId = String(_wfLoadedDef.id || _wfSelectedId || '');
+            if (!prevWorkflowId || prevWorkflowId !== loadedWorkflowId || _wfDrill.workflowId !== loadedWorkflowId) {
+                _wfDrill = { kind: 'workflow', nodeId: '', edgeIndex: -1, workflowId: loadedWorkflowId };
+            }
+            renderWorkflowList();
+
+            var matchingNodeStates = null;
+            if (_wfLastExec && _wfLoadedDef && _wfLastExec.workflow_id === _wfLoadedDef.id) {
+                matchingNodeStates = _wfLastExec.node_states || null;
+            }
+            renderWorkflowGraph(_wfLoadedDef, matchingNodeStates);
+            renderWorkflowNodeStates(_wfLoadedDef, matchingNodeStates);
+            _wfRenderDrillDetail();
+            _wfSetExecStatus('Loaded definition for workflow: ' + (_wfLoadedDef.id || _wfSelectedId), false);
+            return;
+        }
+
+        if (toolName === 'workflow_execute' || toolName === 'workflow_status') {
+            if (msg.error) {
+                _wfSetBadge('failed', 'FAILED');
+                _wfSetExecStatus(toolName + ' failed: ' + msg.error, true);
+                _wfStopPolling();
+                return;
+            }
+            if (!payload || typeof payload !== 'object') {
+                _wfSetExecStatus(toolName + ' returned non-JSON output.', true);
+                return;
+            }
+            if (payload.error) {
+                _wfSetBadge('failed', 'FAILED');
+                _wfSetExecStatus(payload.error, true);
+                _wfStopPolling();
+                return;
+            }
+
+            _wfRenderExecution(payload);
+
+            if (toolName === 'workflow_execute' && payload.execution_id && _wfNormalizeStatus(payload.status) !== 'running') {
+                callTool('workflow_status', { execution_id: payload.execution_id });
+            }
+            return;
+        }
+    }
+
+    function handleWorkflowActivity(event) {
+        if (!event || !event.tool) return;
+
+        // Don't add sentinel events to the visible activity log
+        if (event.durationMs === -1 || event.durationMs === -2) {
+            // Remove from activity log — these are live workflow trace events, not user-visible entries
+            var idx = _activityLog.indexOf(event);
+            if (idx >= 0) _activityLog.splice(idx, 1);
+        }
+
+        var payload = _wfParsePayload(event.result || null);
+        if (!payload || typeof payload !== 'object') return;
+
+        // Auto-load workflow definition if we don't have it
+        if (payload.workflow_id && (!_wfLoadedDef || _wfLoadedDef.id !== payload.workflow_id)) {
+            callTool('workflow_get', { workflow_id: payload.workflow_id });
+            // Also refresh the list so it appears
+            callTool('workflow_list', {});
+        }
+
+        _wfRenderExecution(payload);
     }
 
     // ── MEMORY INLINE DRILL ──
@@ -748,6 +1811,12 @@
         delete _pendingTools[msg.id];
 
         var text = msg.error ? 'ERROR: ' + msg.error : parseToolData(msg.data);
+
+        if (WORKFLOW_TOOLS.indexOf(toolName) >= 0) {
+            handleWorkflowToolResult(toolName, msg, text);
+            return;
+        }
+
         // Format tool output for readability (extract error guidance)
         if (!msg.error) text = formatToolOutput(text);
 
@@ -887,6 +1956,12 @@
                 councilOut.innerHTML = '<pre style="white-space:pre-wrap;word-break:break-word;color:var(--text);font-size:11px;">' +
                     text.substring(0, 10000).replace(/</g, '&lt;') + '</pre>';
             }
+
+            // Keep slot cards visually in sync after mutations.
+            if (['plug_model', 'hub_plug', 'unplug_slot', 'clone_slot', 'rename_slot', 'swap_slots', 'cu' + 'll_slot'].indexOf(toolName) >= 0) {
+                if (toolName === 'plug_model' || toolName === 'hub_plug') _clearPluggingState();
+                if (!msg.error) callTool('list_slots', {});
+            }
             return;
         }
 
@@ -911,6 +1986,7 @@
         container.innerHTML = '';
         var cats = _state.categories || {};
         var entries = Object.entries(CATEGORIES);
+        var hasSchemas = Object.keys(_toolSchemas).length > 0;
 
         for (var i = 0; i < entries.length; i++) {
             var name = entries[i][0];
@@ -931,17 +2007,107 @@
             body.className = 'tool-category-body';
             for (var j = 0; j < info.tools.length; j++) {
                 var toolName = info.tools[j];
+                var schema = hasSchemas ? _toolSchemas[toolName] : null;
                 var row = document.createElement('div');
-                row.className = 'tool-row';
-                row.innerHTML = '<div><span class="tool-name">' + toolName + '</span></div>';
-                var btn = document.createElement('button');
-                btn.className = 'btn-dim';
-                btn.textContent = 'INVOKE';
-                btn.dataset.tool = toolName;
-                btn.addEventListener('click', function () {
+                row.className = 'tool-row-wrap';
+
+                // Tool header row
+                var hdr = document.createElement('div');
+                hdr.className = 'tool-row';
+                var nameSpan = document.createElement('span');
+                nameSpan.className = 'tool-name';
+                nameSpan.textContent = toolName;
+                var leftDiv = document.createElement('div');
+                leftDiv.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer';
+                leftDiv.appendChild(nameSpan);
+                if (schema && schema.description) {
+                    var brief = document.createElement('span');
+                    brief.className = 'tool-brief';
+                    brief.textContent = schema.description.length > 80 ? schema.description.substring(0, 80) + '...' : schema.description;
+                    leftDiv.appendChild(brief);
+                }
+                hdr.appendChild(leftDiv);
+
+                var btnGroup = document.createElement('div');
+                btnGroup.style.cssText = 'display:flex;gap:4px;align-items:center';
+                if (schema) {
+                    var expandBtn = document.createElement('button');
+                    expandBtn.className = 'btn-dim';
+                    expandBtn.textContent = 'DETAIL';
+                    expandBtn.dataset.tool = toolName;
+                    expandBtn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        var wrap = this.closest('.tool-row-wrap');
+                        var detail = wrap.querySelector('.tool-detail');
+                        if (detail) {
+                            detail.classList.toggle('visible');
+                            this.textContent = detail.classList.contains('visible') ? 'HIDE' : 'DETAIL';
+                        }
+                    });
+                    btnGroup.appendChild(expandBtn);
+                }
+                var invokeBtn = document.createElement('button');
+                invokeBtn.className = 'btn-dim';
+                invokeBtn.textContent = 'INVOKE';
+                invokeBtn.dataset.tool = toolName;
+                invokeBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
                     promptToolCall(this.dataset.tool);
                 });
-                row.appendChild(btn);
+                btnGroup.appendChild(invokeBtn);
+                hdr.appendChild(btnGroup);
+                row.appendChild(hdr);
+
+                // Expandable detail panel
+                if (schema) {
+                    var detail = document.createElement('div');
+                    detail.className = 'tool-detail';
+                    var detailHTML = '';
+
+                    // Description
+                    if (schema.description) {
+                        detailHTML += '<div class="td-section"><div class="td-label">Description</div><div class="td-value">' + escHtml(schema.description) + '</div></div>';
+                    }
+
+                    // Input parameters
+                    var inputSchema = schema.inputSchema || (schema.parameters ? schema.parameters : null);
+                    if (inputSchema && inputSchema.properties) {
+                        var props = inputSchema.properties;
+                        var required = inputSchema.required || [];
+                        var paramNames = Object.keys(props);
+                        if (paramNames.length > 0) {
+                            detailHTML += '<div class="td-section"><div class="td-label">Parameters (' + paramNames.length + ')</div>';
+                            for (var k = 0; k < paramNames.length; k++) {
+                                var pName = paramNames[k];
+                                var pDef = props[pName];
+                                var isReq = required.indexOf(pName) >= 0;
+                                detailHTML += '<div class="td-param">';
+                                detailHTML += '<span class="td-param-name">' + escHtml(pName) + '</span>';
+                                detailHTML += '<span class="td-param-type">' + escHtml(pDef.type || pDef.enum ? (pDef.type || 'enum') : 'any') + '</span>';
+                                if (isReq) detailHTML += '<span class="td-param-req">required</span>';
+                                if (pDef.description) detailHTML += '<div class="td-param-desc">' + escHtml(pDef.description) + '</div>';
+                                if (pDef.default !== undefined) detailHTML += '<div class="td-param-desc">Default: <code>' + escHtml(JSON.stringify(pDef.default)) + '</code></div>';
+                                if (pDef.enum) detailHTML += '<div class="td-param-desc">Values: <code>' + escHtml(pDef.enum.join(', ')) + '</code></div>';
+                                if (pDef.minimum !== undefined || pDef.maximum !== undefined) {
+                                    detailHTML += '<div class="td-param-desc">Range: ' + (pDef.minimum !== undefined ? pDef.minimum : '...') + ' – ' + (pDef.maximum !== undefined ? pDef.maximum : '...') + '</div>';
+                                }
+                                detailHTML += '</div>';
+                            }
+                            detailHTML += '</div>';
+                        } else {
+                            detailHTML += '<div class="td-section"><div class="td-label">Parameters</div><div class="td-value" style="opacity:0.5">No parameters</div></div>';
+                        }
+                    } else {
+                        detailHTML += '<div class="td-section"><div class="td-label">Parameters</div><div class="td-value" style="opacity:0.5">No parameters</div></div>';
+                    }
+
+                    // Category & setting info
+                    detailHTML += '<div class="td-section"><div class="td-label">Category</div><div class="td-value">' + escHtml(name) + ' (setting: champion.tools.' + escHtml(info.setting) + ')</div></div>';
+
+                    detail.innerHTML = detailHTML;
+                    row.appendChild(detail);
+                }
+
                 body.appendChild(row);
             }
 
@@ -949,6 +2115,20 @@
             div.appendChild(body);
             container.appendChild(div);
         }
+
+        // Show hint if schemas not loaded yet
+        if (!hasSchemas && _state.serverStatus === 'running') {
+            var hint = document.createElement('div');
+            hint.style.cssText = 'text-align:center;padding:12px;opacity:0.5;font-size:12px';
+            hint.textContent = 'Loading tool schemas from MCP server...';
+            container.appendChild(hint);
+            vscode.postMessage({ command: 'fetchToolSchemas' });
+        }
+    }
+
+    function escHtml(str) {
+        if (!str) return '';
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     function promptToolCall(toolName) {
@@ -1005,6 +2185,10 @@
         var modelId = document.getElementById('plug-model-id').value;
         var slotName = document.getElementById('plug-slot-name').value;
         if (!modelId) return;
+        // Track the plugging operation for loading UI
+        var slotKey = slotName || 'next';
+        _pluggingSlots[slotKey] = { modelId: modelId, startTime: Date.now() };
+        _updatePluggingUI();
         callTool('plug_model', { model_id: modelId, slot_name: slotName || undefined });
         closeModals();
     }
@@ -1029,6 +2213,7 @@
     var _chatMessages = [];
     var _workflowEvents = [];
     var _nostrPubkey = '';
+    var _nostrRelayCount = 0;
     var _dmMessages = []; // { event, decrypted, peerPubkey }
     var _activeDMPeer = ''; // currently selected DM conversation
     var _blockedUsers = [];
@@ -1059,6 +2244,11 @@
             document.querySelectorAll('.community-subtab').forEach(function (t) { t.style.display = 'none'; t.classList.remove('active'); });
             var target = document.getElementById('ctab-' + btn.dataset.ctab);
             if (target) { target.style.display = 'block'; target.classList.add('active'); }
+            // Trigger background gist indexing on marketplace tab activation
+            if (btn.dataset.ctab === 'marketplace' && !_gistIndexingTriggered) {
+                _gistIndexingTriggered = true;
+                vscode.postMessage({ command: 'triggerGistIndexing' });
+            }
         });
     });
 
@@ -1092,13 +2282,17 @@
     // ── IDENTITY ──
     function handleNostrIdentity(msg) {
         _nostrPubkey = msg.pubkey || '';
+        _nostrRelayCount = msg.relayCount || 0;
+        _renderZapReadiness({});
         var dot = document.getElementById('nostr-dot');
         var npub = document.getElementById('nostr-npub');
         var relays = document.getElementById('nostr-relays');
         if (msg.disabled) {
+            _nostrRelayCount = 0;
             if (dot) dot.className = 'dot red';
             if (npub) npub.textContent = 'Nostr service unavailable';
             if (relays) relays.textContent = 'check deps';
+            _renderZapReadiness({});
             return;
         }
         if (dot) dot.className = 'dot ' + (msg.connected ? 'green pulse' : msg.npub ? 'amber pulse' : 'off');
@@ -1122,7 +2316,7 @@
 
     function handleZapResult(msg) {
         if (!msg.success) {
-            alert('Zap failed: ' + (msg.error || 'Unknown error'));
+            mpToast('Zap failed: ' + (msg.error || 'Unknown error'), 'error', 5600);
             return;
         }
         if (msg.invoice) {
@@ -1130,13 +2324,14 @@
             var invoiceStr = msg.invoice;
             var copyMsg = 'Lightning invoice for ' + msg.amountSats + ' sats to ' + (msg.lud16 || 'recipient') +
                 ':\n\n' + invoiceStr + '\n\nCopy this invoice and pay it in your Lightning wallet (Alby, Zeus, Phoenix, etc.)';
+            mpToast('Zap invoice ready. Pay it in your Lightning wallet to complete the zap.', 'success', 4600);
             if (window.prompt) {
                 window.prompt(copyMsg, invoiceStr);
             } else {
                 alert(copyMsg);
             }
         } else {
-            alert('Zap request sent for ' + msg.amountSats + ' sats! Recipient does not support Nostr zaps — consider sending directly via their Lightning address.');
+            mpToast('Zap request created for ' + msg.amountSats + ' sats, but recipient does not support Nostr zaps.', 'info', 5200);
         }
     }
 
@@ -1311,10 +2506,21 @@
         return { safe: criticals === 0, trustLevel: trustLevel, score: score, flags: flags };
     }
 
-    // ── MARKETPLACE DOC TYPES ──
-    var VALID_DOC_TYPES = ['workflow', 'skill', 'playbook', 'recipe'];
-    var DOC_TYPE_LABELS = { workflow: 'WORKFLOW', skill: 'SKILL', playbook: 'PLAYBOOK', recipe: 'RECIPE' };
-    var DOC_TYPE_COLORS = { workflow: 'var(--accent)', skill: '#e879f9', playbook: '#34d399', recipe: '#fbbf24' };
+    // ── MARKETPLACE WORKFLOW NORMALIZATION ──
+    var SOURCE_DOC_TYPES = ['workflow', 'skill', 'playbook', 'recipe'];
+    var WORKFLOW_ROLE_ORDER = ['automation', 'operations', 'integration', 'knowledge'];
+    var WORKFLOW_ROLE_LABELS = {
+        automation: 'AUTOMATION',
+        operations: 'OPERATIONS',
+        integration: 'INTEGRATION',
+        knowledge: 'KNOWLEDGE'
+    };
+    var WORKFLOW_ROLE_COLORS = {
+        automation: 'var(--accent)',
+        operations: '#34d399',
+        integration: '#fbbf24',
+        knowledge: '#60a5fa'
+    };
 
     // ── MARKETPLACE CATEGORY TAXONOMY ──
     var MP_CATEGORIES = {
@@ -1340,46 +2546,163 @@
         'memory':        'Memory & Knowledge',
         'other':         'Other'
     };
-    var _mpFilter = { search: '', category: 'all', sort: 'newest', docType: 'all' };
+    var _mpFilter = { search: '', category: 'all', sort: 'newest', role: 'all', source: 'all' };
+    var _gistMarketplaceItems = [];  // Gist-sourced marketplace items
+    var _gistSearchDebounce = null;
+    var _gistIndexingTriggered = false;
+
+    function _slugifyName(input) {
+        return String(input || 'workflow')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'workflow';
+    }
+
+    function _detectWorkflowRole(sourceDocType, content, tags) {
+        var role = String((content && (content.workflowRole || content.role)) || '').toLowerCase();
+        if (WORKFLOW_ROLE_ORDER.indexOf(role) !== -1) return role;
+
+        var roleTag = (tags || []).find(function (t) { return String(t).indexOf('workflow-role:') === 0; });
+        if (roleTag) {
+            var parsedTagRole = String(roleTag).slice('workflow-role:'.length).toLowerCase();
+            if (WORKFLOW_ROLE_ORDER.indexOf(parsedTagRole) !== -1) return parsedTagRole;
+        }
+
+        var map = {
+            workflow: 'automation',
+            playbook: 'operations',
+            recipe: 'integration',
+            skill: 'knowledge'
+        };
+        return map[sourceDocType] || 'automation';
+    }
+
+    function _parseWorkflowDefinition(body) {
+        if (!body) return null;
+        if (typeof body === 'object' && !Array.isArray(body)) return body;
+        if (typeof body !== 'string') return null;
+        try {
+            return JSON.parse(body);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function _isWorkflowDefinition(def) {
+        return !!(def && typeof def === 'object' && !Array.isArray(def) && Array.isArray(def.nodes));
+    }
+
+    function _normalizeWorkflowDefinition(body, fallback) {
+        var parsed = _parseWorkflowDefinition(body);
+        if (!_isWorkflowDefinition(parsed)) return null;
+
+        var def = parsed;
+        if (!Array.isArray(def.connections)) def.connections = [];
+        if (!def.id) def.id = _slugifyName((fallback && fallback.name) || 'workflow');
+        if (!def.name && fallback && fallback.name) def.name = fallback.name;
+        if (!def.description && fallback && fallback.description) def.description = fallback.description;
+
+        def.meta = def.meta || {};
+        def.meta.marketplace = def.meta.marketplace || {};
+        if (fallback && fallback.workflowRole) def.meta.marketplace.workflow_role = fallback.workflowRole;
+        if (fallback && fallback.category) def.meta.marketplace.category = fallback.category;
+        if (fallback && fallback.sourceDocType && fallback.sourceDocType !== 'workflow') {
+            def.meta.marketplace.source_doc_type = fallback.sourceDocType;
+        }
+        return def;
+    }
+
+    function _buildWrappedWorkflowDefinition(parsed, sourceEventId) {
+        var role = parsed.workflowRole || 'knowledge';
+        var bodyText = typeof parsed.body === 'string'
+            ? parsed.body
+            : JSON.stringify(parsed.body || {}, null, 2);
+        var baseId = _slugifyName(parsed.name || 'imported-workflow');
+
+        return {
+            id: baseId + '-wrapped',
+            name: parsed.name || 'Imported Workflow',
+            description: parsed.description || 'Legacy marketplace listing wrapped as executable workflow.',
+            nodes: [
+                { id: 'input', type: 'input' },
+                {
+                    id: 'attach_context',
+                    type: 'set',
+                    parameters: {
+                        mode: 'append',
+                        values: {
+                            workflow_role: role,
+                            source_doc_type: parsed.sourceDocType || 'workflow',
+                            imported_name: parsed.name || '',
+                            imported_description: parsed.description || '',
+                            imported_body: bodyText
+                        }
+                    }
+                },
+                { id: 'output', type: 'output' }
+            ],
+            connections: [
+                { from: 'input', to: 'attach_context' },
+                { from: 'attach_context', to: 'output' }
+            ],
+            meta: {
+                marketplace: {
+                    wrapped_import: true,
+                    workflow_role: role,
+                    source_doc_type: parsed.sourceDocType || 'workflow',
+                    category: parsed.category || 'other',
+                    source_event_id: sourceEventId || ''
+                }
+            }
+        };
+    }
+
+    function _workflowDefinitionForImport(parsed, sourceEventId) {
+        if (parsed && parsed.workflowDefinition) return parsed.workflowDefinition;
+        return _buildWrappedWorkflowDefinition(parsed || {}, sourceEventId || '');
+    }
 
     function parseDocContent(ev) {
         var content = {};
         try { content = JSON.parse(ev.content); } catch (e) { content = { name: 'Unknown', description: ev.content }; }
         var tags = (ev.tags || []).filter(function (t) {
-            return t[0] === 't' && t[1] !== 'ouroboros' && t[1] !== 'ouroboros-workflow' && t[1] !== 'ouroboros-doc'
-                && !t[1].match(/^ouroboros-(?:workflow|skill|playbook|recipe)$/);
+            return t[0] === 't' && t[1] && t[1] !== 'ouroboros' && t[1] !== 'ouroboros-workflow' && t[1] !== 'ouroboros-doc'
+                && String(t[1]).indexOf('ouroboros-') !== 0;
         }).map(function (t) { return t[1]; });
         var catTag = (ev.tags || []).find(function (t) { return t[0] === 'c'; });
         var category = catTag ? catTag[1] : (content.category || '');
         if (!MP_CATEGORIES[category]) category = 'other';
 
-        // Detect docType: new schema has docType field; old schema is implicitly 'workflow'
-        var docType = content.docType || 'workflow';
-        if (VALID_DOC_TYPES.indexOf(docType) === -1) docType = 'workflow';
+        var sourceDocType = content.docType || 'workflow';
+        if (SOURCE_DOC_TYPES.indexOf(sourceDocType) === -1) sourceDocType = 'workflow';
+        var workflowRole = _detectWorkflowRole(sourceDocType, content, tags);
 
         // Body: new schema uses 'body', old uses 'workflow'
         var body = content.body || content.workflow || '';
-        var bodyFormat = content.bodyFormat || (docType === 'workflow' ? 'json' : 'text');
+        var bodyFormat = content.bodyFormat || 'json';
         var schemaVersion = content.schemaVersion || 0;
         var contentDigest = content.contentDigest || '';
+        var workflowDefinition = _normalizeWorkflowDefinition(body, {
+            name: content.name || 'Untitled',
+            description: content.description || '',
+            workflowRole: workflowRole,
+            category: category,
+            sourceDocType: sourceDocType
+        });
 
-        // Compute stats per docType
-        var nodeCount = 0;
-        var lineCount = 0;
-        if (docType === 'workflow') {
-            try {
-                var wf = typeof body === 'string' ? JSON.parse(body) : body;
-                if (wf && wf.nodes) nodeCount = wf.nodes.length;
-            } catch (e) {}
-        } else {
-            lineCount = typeof body === 'string' ? body.split('\n').length : 0;
-        }
+        var nodeCount = workflowDefinition && Array.isArray(workflowDefinition.nodes)
+            ? workflowDefinition.nodes.length
+            : 0;
+        var lineCount = typeof body === 'string' ? body.split('\n').length : 0;
 
         // Safety scan on ingest
-        var safety = scanDocSafety({ name: content.name, description: content.description, body: body, tags: tags });
+        var safetyBody = typeof body === 'string' ? body : JSON.stringify(body || {});
+        var safety = scanDocSafety({ name: content.name, description: content.description, body: safetyBody, tags: tags });
 
         return {
-            docType: docType,
+            docType: 'workflow',
+            sourceDocType: sourceDocType,
+            workflowRole: workflowRole,
             name: content.name || 'Untitled',
             description: content.description || '',
             category: category,
@@ -1388,6 +2711,8 @@
             estTime: content.estTime || 'fast',
             bodyFormat: bodyFormat,
             body: body,
+            workflowDefinition: workflowDefinition,
+            requiresWrapOnImport: !workflowDefinition,
             nodeCount: nodeCount,
             lineCount: lineCount,
             tags: tags,
@@ -1402,16 +2727,18 @@
     function parseWfContent(ev) { return parseDocContent(ev); }
 
     function getFilteredWorkflows() {
+        // Source filter — skip Nostr items when gist-only
+        if (_mpFilter.source === 'gist') return [];
         var filtered = _workflowEvents.slice();
         // Safety filter — hide blocked listings
         filtered = filtered.filter(function (ev) {
             var p = parseDocContent(ev);
             return p.safety.trustLevel !== 'blocked';
         });
-        // DocType filter
-        if (_mpFilter.docType !== 'all') {
+        // Role filter
+        if (_mpFilter.role !== 'all') {
             filtered = filtered.filter(function (ev) {
-                return parseDocContent(ev).docType === _mpFilter.docType;
+                return parseDocContent(ev).workflowRole === _mpFilter.role;
             });
         }
         // Category filter
@@ -1430,7 +2757,8 @@
                        p.tags.some(function (t) { return t.toLowerCase().indexOf(q) !== -1; }) ||
                        displayName(ev.pubkey).toLowerCase().indexOf(q) !== -1 ||
                        p.category.toLowerCase().indexOf(q) !== -1 ||
-                       p.docType.toLowerCase().indexOf(q) !== -1;
+                       p.workflowRole.toLowerCase().indexOf(q) !== -1 ||
+                       p.sourceDocType.toLowerCase().indexOf(q) !== -1;
             });
         }
         // Sort
@@ -1468,16 +2796,16 @@
         if (!el) return;
         var counts = { all: 0 };
         _workflowEvents.forEach(function (ev) {
-            var dt = parseDocContent(ev).docType;
-            counts[dt] = (counts[dt] || 0) + 1;
+            var role = parseDocContent(ev).workflowRole;
+            counts[role] = (counts[role] || 0) + 1;
             counts.all++;
         });
-        var html = '<button class="mp-cat-pill' + (_mpFilter.docType === 'all' ? ' active' : '') + '" data-mp-dtype="all">ALL<span class="pill-count">' + counts.all + '</span></button>';
-        VALID_DOC_TYPES.forEach(function (dt) {
-            var c = counts[dt] || 0;
-            var color = DOC_TYPE_COLORS[dt] || 'var(--text-dim)';
-            html += '<button class="mp-cat-pill' + (_mpFilter.docType === dt ? ' active' : '') + '" data-mp-dtype="' + dt + '" style="border-color:' + color + ';">' +
-                DOC_TYPE_LABELS[dt] + (c > 0 ? '<span class="pill-count">' + c + '</span>' : '') + '</button>';
+        var html = '<button class="mp-cat-pill' + (_mpFilter.role === 'all' ? ' active' : '') + '" data-mp-dtype="all">ALL<span class="pill-count">' + counts.all + '</span></button>';
+        WORKFLOW_ROLE_ORDER.forEach(function (role) {
+            var c = counts[role] || 0;
+            var color = WORKFLOW_ROLE_COLORS[role] || 'var(--text-dim)';
+            html += '<button class="mp-cat-pill' + (_mpFilter.role === role ? ' active' : '') + '" data-mp-dtype="' + role + '" style="border-color:' + color + ';">' +
+                WORKFLOW_ROLE_LABELS[role] + (c > 0 ? '<span class="pill-count">' + c + '</span>' : '') + '</button>';
         });
         el.innerHTML = html;
     }
@@ -1509,15 +2837,26 @@
         return '';
     }
 
-    function docTypeBadge(docType) {
-        var label = DOC_TYPE_LABELS[docType] || docType.toUpperCase();
-        var color = DOC_TYPE_COLORS[docType] || 'var(--text-dim)';
+    function docTypeBadge() {
+        return '<span class="wf-doctype-badge" style="color:var(--accent);border-color:var(--accent);">WORKFLOW</span>';
+    }
+
+    function sourceBadge(source) {
+        if (source === 'gist') return '<span class="wf-source-badge gist-badge">GIST</span>';
+        if (source === 'local') return '<span class="wf-source-badge local-badge">LOCAL</span>';
+        return '<span class="wf-source-badge nostr-badge">NOSTR</span>';
+    }
+
+    function workflowRoleBadge(role) {
+        var label = WORKFLOW_ROLE_LABELS[role] || String(role || 'automation').toUpperCase();
+        var color = WORKFLOW_ROLE_COLORS[role] || 'var(--text-dim)';
         return '<span class="wf-doctype-badge" style="color:' + color + ';border-color:' + color + ';">' + label + '</span>';
     }
 
     function docStatLine(p) {
-        if (p.docType === 'workflow') return '<span>' + p.nodeCount + ' nodes</span>';
-        return '<span>' + p.lineCount + ' lines</span>';
+        if (p.nodeCount > 0) return '<span>' + p.nodeCount + ' nodes</span>';
+        if (p.requiresWrapOnImport) return '<span>' + p.lineCount + ' lines</span><span>wrapped import</span>';
+        return '<span>workflow metadata</span>';
     }
 
     // ── DOCUMENT CARD RENDERING ──
@@ -1528,15 +2867,16 @@
         renderMPDocTypePills();
         renderMPCategories();
         var overlay = document.getElementById('wf-detail-overlay');
-        if (overlay) overlay.classList.remove('visible');
+        var detailOpen = overlay && overlay.classList.contains('visible');
+        if (detailOpen) return; // Don't clobber the detail view while user is reading it
 
-        if (_workflowEvents.length === 0) {
-            feed.innerHTML = '<div class="mp-empty">No documents published yet.<br><span style="font-size:10px;color:var(--accent);">Be the first \u2014 hit PUBLISH to list your work.</span></div>';
+        if (_workflowEvents.length === 0 && _gistMarketplaceItems.length === 0) {
+            feed.innerHTML = '<div class="mp-empty">No workflows published yet.<br><span style="font-size:10px;color:var(--accent);">Be the first — hit PUBLISH to list your workflow.</span></div>';
             return;
         }
         var filtered = getFilteredWorkflows();
         if (filtered.length === 0) {
-            feed.innerHTML = '<div class="mp-empty">No documents match your filters.<br><span style="font-size:10px;">Try a different query, category, or doc type.</span></div>';
+            feed.innerHTML = '<div class="mp-empty">No workflows match your filters.<br><span style="font-size:10px;">Try a different query, category, or role.</span></div>';
             return;
         }
         feed.innerHTML = filtered.map(function (ev) {
@@ -1547,7 +2887,9 @@
             var flagged = p.safety.trustLevel === 'flagged';
             return '<div class="wf-card' + (flagged ? ' wf-card-flagged' : '') + '" data-wf-detail-id="' + ev.id + '">' +
                 '<div class="wf-header">' +
-                docTypeBadge(p.docType) +
+                sourceBadge('nostr') +
+                docTypeBadge() +
+                workflowRoleBadge(p.workflowRole) +
                 '<div class="wf-title">' + safeHTML(p.name) + '</div>' +
                 safetyBadge(p.safety) +
                 '<span class="wf-cat-badge">' + safeHTML(catLabel) + '</span>' +
@@ -1561,20 +2903,117 @@
                 (p.bodyFormat !== 'json' && p.bodyFormat !== 'text' ? '<span>' + p.bodyFormat + '</span>' : '') +
                 '</div>' +
                 (p.tags.length > 0 ? '<div class="wf-tags">' + p.tags.map(function (t) { return '<span>' + safeHTML(t) + '</span>'; }).join('') + '</div>' : '') +
+                (p.requiresWrapOnImport ? '<div class="wf-flag-warn">Legacy content will be auto-wrapped into an executable workflow on import.</div>' : '') +
                 (flagged ? '<div class="wf-flag-warn">\u26A0 ' + p.safety.flags.length + ' safety flag(s) detected. Review before importing.</div>' : '') +
                 '<div class="wf-actions">' +
-                '<button class="btn-dim" data-wf-import=\'' + (ev.content || '').replace(/'/g, '&#39;') + '\'' + (flagged ? ' title="Review safety flags first"' : '') + '>IMPORT</button>' +
+                '<button class="btn-dim" data-wf-import="' + ev.id + '"' + (flagged ? ' title="Review safety flags first"' : '') + '>IMPORT</button>' +
                 '<button class="btn-dim" data-wf-detail="' + ev.id + '">DETAILS</button>' +
                 '<button class="btn-dim" data-wf-react="' + ev.id + '" data-wf-pubkey="' + ev.pubkey + '">ZAP</button>' +
                 '</div>' +
                 '</div>';
         }).join('');
+
+        // Append gist marketplace items (if not filtered to nostr-only)
+        if (_mpFilter.source === 'all' || _mpFilter.source === 'gist') {
+            var gistFiltered = _gistMarketplaceItems.filter(function (item) {
+                if (_mpFilter.source === 'nostr') return false;
+                if (_mpFilter.category !== 'all' && item.category !== _mpFilter.category) return false;
+                if (_mpFilter.search) {
+                    var q = _mpFilter.search.toLowerCase();
+                    var searchable = (item.name + ' ' + item.description + ' ' + (item.tags || []).join(' ') + ' ' + item.docType).toLowerCase();
+                    if (searchable.indexOf(q) === -1) return false;
+                }
+                return true;
+            });
+            if (gistFiltered.length > 0) {
+                feed.innerHTML += '<div class="mp-section-header">PUBLIC GISTS<span class="pill-count">' + gistFiltered.length + '</span></div>';
+                feed.innerHTML += gistFiltered.map(function (item) {
+                    var author = item.pubkey.replace('github:', '');
+                    var ts = item.createdAt ? new Date(item.createdAt).toLocaleDateString() : '';
+                    var catLabel = MP_CATEGORIES[item.category] || item.category || 'other';
+                    var dtBadge = '<span class="wf-doctype-badge" style="color:var(--accent);border-color:var(--accent);">' + (item.docType || 'recipe').toUpperCase() + '</span>';
+                    return '<div class="wf-card wf-card-gist" data-gist-detail-id="' + safeHTML(item.eventId) + '">' +
+                        '<div class="wf-header">' +
+                        sourceBadge('gist') +
+                        dtBadge +
+                        '<div class="wf-title">' + safeHTML(item.name) + '</div>' +
+                        '<span class="wf-cat-badge">' + safeHTML(catLabel) + '</span>' +
+                        '</div>' +
+                        '<div class="wf-author">by ' + safeHTML(author) + (ts ? ' &middot; ' + ts : '') + '</div>' +
+                        (item.description ? '<div class="wf-desc">' + safeHTML(item.description) + '</div>' : '') +
+                        (item.tags && item.tags.length > 0 ? '<div class="wf-tags">' + item.tags.map(function (t) { return '<span>' + safeHTML(t) + '</span>'; }).join('') + '</div>' : '') +
+                        '<div class="wf-actions">' +
+                        '<button class="btn-dim" data-gist-view="' + safeHTML(item.eventId.replace('gist:', '')) + '">VIEW</button>' +
+                        '<button class="btn-dim" data-gist-fork="' + safeHTML(item.eventId.replace('gist:', '')) + '">FORK</button>' +
+                        '<button class="btn-dim" data-gist-save="' + safeHTML(item.eventId.replace('gist:', '')) + '">SAVE TO MEMORY</button>' +
+                        '</div>' +
+                        '</div>';
+                }).join('');
+            }
+        }
+
+        // Hide nostr items if source filter is gist-only
+        if (_mpFilter.source === 'gist') {
+            // Already handled above — clear nostr cards
+            var nostrCards = feed.querySelectorAll('.wf-card:not(.wf-card-gist)');
+            for (var nc = 0; nc < nostrCards.length; nc++) {
+                nostrCards[nc].style.display = 'none';
+            }
+        }
+
         // Pagination: load-more button
+        var totalShown = filtered.length + (_mpFilter.source !== 'nostr' ? _gistMarketplaceItems.length : 0);
         if (filtered.length >= 10) {
             var oldest = filtered[filtered.length - 1].created_at;
             feed.innerHTML += '<div style="text-align:center;padding:12px;"><button class="btn-dim" id="mp-load-more" data-until="' + oldest + '">LOAD MORE</button>' +
-                '<div style="font-size:8px;color:var(--text-dim);margin-top:4px;">Showing ' + filtered.length + ' of ' + _workflowEvents.length + ' loaded</div></div>';
+                '<div style="font-size:8px;color:var(--text-dim);margin-top:4px;">Showing ' + totalShown + ' items (' + filtered.length + ' Nostr + ' + _gistMarketplaceItems.length + ' Gists)</div></div>';
         }
+    }
+
+    // ── GIST DETAIL VIEW ──
+    function showGistDetail(gistId) {
+        var overlay = document.getElementById('wf-detail-overlay');
+        if (!overlay) return;
+        // Find in gist items
+        var item = _gistMarketplaceItems.find(function (i) { return i.eventId === 'gist:' + gistId || i.eventId === gistId; });
+        if (!item) return;
+
+        var author = (item.pubkey || '').replace('github:', '');
+        var ts = item.createdAt ? new Date(item.createdAt).toLocaleString() : '';
+        var catLabel = MP_CATEGORIES[item.category] || item.category || 'other';
+        var dtLabel = (item.docType || 'recipe').toUpperCase();
+
+        overlay.innerHTML =
+            '<button class="btn-dim wf-detail-back" id="wf-detail-back">&larr; BACK TO MARKETPLACE</button>' +
+            '<div style="display:flex;align-items:center;gap:8px;">' +
+            sourceBadge('gist') +
+            '<span class="wf-doctype-badge" style="color:var(--accent);border-color:var(--accent);">' + dtLabel + '</span>' +
+            '<div class="wf-detail-title">' + safeHTML(item.name) + '</div>' +
+            '</div>' +
+            '<div class="wf-detail-meta">' +
+            'by <strong>' + safeHTML(author) + '</strong> &middot; ' + ts + ' &middot; ' +
+            '<span style="color:var(--accent);">' + safeHTML(catLabel) + '</span>' +
+            '</div>' +
+            '<div class="wf-detail-section">' +
+            '<div class="wf-detail-section-title">DESCRIPTION</div>' +
+            '<div class="wf-detail-body">' + safeHTML(item.description || 'No description') + '</div>' +
+            '</div>' +
+            '<div class="wf-detail-section">' +
+            '<div class="wf-detail-section-title">TAGS</div>' +
+            '<div class="wf-tags">' + (item.tags || []).map(function (t) { return '<span>' + safeHTML(t) + '</span>'; }).join('') + '</div>' +
+            '</div>' +
+            '<div id="gist-content-loading" style="color:var(--text-dim);font-size:10px;padding:8px;">Loading gist content...</div>' +
+            '<div id="gist-content-area"></div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">' +
+            '<button data-gist-fork="' + safeHTML(gistId) + '">FORK TO MY GISTS</button>' +
+            '<button class="btn-dim" data-gist-save="' + safeHTML(gistId) + '">SAVE TO MEMORY</button>' +
+            '<button class="btn-dim" data-gist-open="' + safeHTML(gistId) + '">VIEW ON GITHUB</button>' +
+            '<button class="btn-dim" id="wf-detail-back2">&larr; BACK</button>' +
+            '</div>';
+        overlay.classList.add('visible');
+
+        // Fetch full content
+        vscode.postMessage({ command: 'requestGistContent', gistId: gistId });
     }
 
     // ── DOCUMENT DETAIL VIEW ──
@@ -1587,18 +3026,18 @@
         var author = displayName(ev.pubkey);
         var ts = new Date(ev.created_at * 1000).toLocaleString();
         var catLabel = MP_CATEGORIES[p.category] || p.category;
-        var dtLabel = DOC_TYPE_LABELS[p.docType] || p.docType.toUpperCase();
+        var roleLabel = WORKFLOW_ROLE_LABELS[p.workflowRole] || String(p.workflowRole).toUpperCase();
 
         // Format body for display
         var bodyPreview = '';
-        if (p.docType === 'workflow') {
-            try {
-                var raw = typeof p.body === 'string' ? JSON.parse(p.body) : p.body;
-                bodyPreview = JSON.stringify(raw, null, 2);
-            } catch (e) { bodyPreview = p.body || JSON.stringify(p.raw, null, 2); }
+        if (p.workflowDefinition) {
+            bodyPreview = JSON.stringify(p.workflowDefinition, null, 2);
         } else {
-            bodyPreview = p.body || '';
+            bodyPreview = typeof p.body === 'string' ? p.body : JSON.stringify(p.body || {}, null, 2);
         }
+        var wrappedPreview = p.requiresWrapOnImport
+            ? JSON.stringify(_buildWrappedWorkflowDefinition(p, ev.id), null, 2)
+            : '';
 
         var gistUrl = p.raw.gistUrl || '';
         var gistId = p.raw.gistId || '';
@@ -1629,21 +3068,24 @@
                 '</div></div>';
         }
 
-        // Spec line varies by docType
-        var specLine = '<strong>Type:</strong> ' + dtLabel + ' &middot; ';
-        if (p.docType === 'workflow') {
+        var specLine = '<strong>Type:</strong> WORKFLOW &middot; <strong>Role:</strong> ' + roleLabel + ' &middot; ';
+        if (p.sourceDocType !== 'workflow') {
+            specLine += '<strong>Source:</strong> ' + String(p.sourceDocType).toUpperCase() + ' &middot; ';
+        }
+        if (p.nodeCount > 0) {
             specLine += '<strong>Nodes:</strong> ' + p.nodeCount + ' &middot; ';
         } else {
-            specLine += '<strong>Lines:</strong> ' + p.lineCount + ' &middot; <strong>Format:</strong> ' + p.bodyFormat + ' &middot; ';
+            specLine += '<strong>Import Path:</strong> Auto-wrap executable &middot; <strong>Lines:</strong> ' + p.lineCount + ' &middot; ';
         }
         specLine += '<strong>Complexity:</strong> ' + p.complexity + ' &middot; <strong>Est. Time:</strong> ' + p.estTime + ' &middot; <strong>Publisher:</strong> ' + ev.pubkey.slice(0, 16) + '...';
         if (p.contentDigest) { specLine += ' &middot; <strong>Digest:</strong> ' + p.contentDigest.slice(0, 12) + '...'; }
 
-        var importLabel = p.docType === 'workflow' ? 'IMPORT WORKFLOW' : 'IMPORT ' + dtLabel;
+        var importLabel = 'IMPORT WORKFLOW';
+        var contentTitle = p.workflowDefinition ? 'WORKFLOW DEFINITION' : 'LEGACY CONTENT';
 
         overlay.innerHTML =
             '<button class="btn-dim wf-detail-back" id="wf-detail-back">&larr; BACK TO MARKETPLACE</button>' +
-            '<div style="display:flex;align-items:center;gap:8px;">' + docTypeBadge(p.docType) + '<div class="wf-detail-title">' + safeHTML(p.name) + '</div>' + safetyBadge(p.safety) + '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px;">' + docTypeBadge() + workflowRoleBadge(p.workflowRole) + '<div class="wf-detail-title">' + safeHTML(p.name) + '</div>' + safetyBadge(p.safety) + '</div>' +
             '<div class="wf-detail-meta">' +
             'by <strong>' + safeHTML(author) + '</strong> &middot; ' + ts + ' &middot; ' +
             '<span style="color:var(--accent);">' + safeHTML(catLabel) + '</span> &middot; v' + safeHTML(p.version) +
@@ -1662,11 +3104,12 @@
             gistSection +
             (p.tags.length > 0 ? '<div class="wf-detail-section"><div class="wf-detail-section-title">TAGS</div><div class="wf-tags">' + p.tags.map(function (t) { return '<span>' + safeHTML(t) + '</span>'; }).join('') + '</div></div>' : '') +
             '<div class="wf-detail-section">' +
-            '<div class="wf-detail-section-title">' + dtLabel + ' CONTENT</div>' +
+            '<div class="wf-detail-section-title">' + contentTitle + '</div>' +
             '<pre>' + safeHTML(bodyPreview) + '</pre>' +
             '</div>' +
+            (wrappedPreview ? '<div class="wf-detail-section"><div class="wf-detail-section-title">AUTO-WRAPPED EXECUTABLE PREVIEW</div><pre>' + safeHTML(wrappedPreview) + '</pre></div>' : '') +
             '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">' +
-            '<button data-wf-import=\'' + (ev.content || '').replace(/'/g, '&#39;') + '\'>' + importLabel + '</button>' +
+            '<button data-wf-import="' + ev.id + '">' + importLabel + '</button>' +
             (gistId ? '<button data-wf-fork="' + gistId + '">FORK (ITERATE)</button>' : '') +
             (gistId ? '<button class="btn-dim" data-wf-history="' + gistId + '">VERSION HISTORY</button>' : '') +
             '<button data-wf-react="' + ev.id + '" data-wf-pubkey="' + ev.pubkey + '">ZAP</button>' +
@@ -1946,6 +3389,9 @@
     if (fetchWfBtn) {
         fetchWfBtn.addEventListener('click', function () {
             vscode.postMessage({ command: 'nostrFetchWorkflows' });
+            // Also trigger gist indexing on refresh
+            _gistIndexingTriggered = false;
+            vscode.postMessage({ command: 'triggerGistIndexing' });
         });
     }
     var fetchChatBtn = document.getElementById('nostr-fetch-chat');
@@ -1968,6 +3414,269 @@
         });
     }
 
+    // ── WORKFLOW OPS CONTROLS ──
+    var wfRefreshBtn = document.getElementById('wfops-refresh');
+    if (wfRefreshBtn) {
+        wfRefreshBtn.addEventListener('click', function () {
+            callTool('workflow_list', {});
+        });
+    }
+
+    var wfLoadBtn = document.getElementById('wfops-load');
+    if (wfLoadBtn) {
+        wfLoadBtn.addEventListener('click', function () {
+            if (!_wfSelectedId) {
+                _wfSetExecStatus('Select a workflow first.', true);
+                return;
+            }
+            callTool('workflow_get', { workflow_id: _wfSelectedId });
+        });
+    }
+
+    var wfExecuteBtn = document.getElementById('wfops-execute');
+    if (wfExecuteBtn) {
+        wfExecuteBtn.addEventListener('click', function () {
+            if (!_wfSelectedId) {
+                _wfSetExecStatus('Select a workflow first.', true);
+                return;
+            }
+
+            var inputEl = document.getElementById('wfops-input');
+            var inputStr = inputEl ? inputEl.value.trim() : '';
+            if (inputStr) {
+                try {
+                    JSON.parse(inputStr);
+                } catch (err) {
+                    _wfSetExecStatus('Execution input must be valid JSON.', true);
+                    return;
+                }
+            }
+
+            _wfSetBadge('running', 'RUNNING...');
+            _wfSetExecStatus('Executing workflow: ' + _wfSelectedId, false);
+            renderWorkflowNodeStates(_wfLoadedDef, null);
+            renderWorkflowGraph(_wfLoadedDef, null);
+
+            callTool('workflow_execute', {
+                workflow_id: _wfSelectedId,
+                input_data: inputStr
+            });
+        });
+    }
+
+    var wfListPanel = document.getElementById('wfops-list');
+    if (wfListPanel) {
+        wfListPanel.addEventListener('click', function (e) {
+            var row = e.target.closest('[data-wfops-id]');
+            if (!row) return;
+            _wfSelectedId = row.dataset.wfopsId || '';
+            _wfDrill = { kind: 'workflow', nodeId: '', edgeIndex: -1, workflowId: _wfSelectedId };
+            renderWorkflowList();
+            if (_wfSelectedId) {
+                callTool('workflow_get', { workflow_id: _wfSelectedId });
+            }
+        });
+    }
+
+    var wfNodeStatusPanel = document.getElementById('wfops-node-status');
+    if (wfNodeStatusPanel) {
+        wfNodeStatusPanel.addEventListener('click', function (e) {
+            var row = e.target.closest('[data-wf-node-id]');
+            if (!row) return;
+            var nodeId = row.getAttribute('data-wf-node-id') || '';
+            _wfSelectNodeDrill(nodeId);
+        });
+    }
+
+    var wfGraphEl = document.getElementById('wfops-graph');
+    if (wfGraphEl) {
+        var _wfClickStart = { x: 0, y: 0 };
+        wfGraphEl.addEventListener('pointerdown', function (e) {
+            _wfClickStart.x = e.clientX;
+            _wfClickStart.y = e.clientY;
+        });
+        wfGraphEl.addEventListener('click', function (e) {
+            // Ignore clicks that were actually drag gestures (moved > 5px)
+            var dx = e.clientX - _wfClickStart.x;
+            var dy = e.clientY - _wfClickStart.y;
+            if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+
+            var target = e.target;
+            if (!target || typeof target.closest !== 'function') return;
+
+            var nodeEl = target.closest('[data-wf-node-id]');
+            if (nodeEl) {
+                _wfSelectNodeDrill(nodeEl.getAttribute('data-wf-node-id') || '');
+                return;
+            }
+
+            var edgeEl = target.closest('[data-wf-edge-index]');
+            if (edgeEl) {
+                _wfSelectEdgeDrill(edgeEl.getAttribute('data-wf-edge-index') || '-1');
+                return;
+            }
+
+            _wfSelectWorkflowDrill();
+        });
+
+        // ── SVG ZOOM + PAN (via svg-pan-zoom library) ──
+        var _wfPanZoomInstance = null;
+
+        function _wfInitPanZoom() {
+            if (_wfPanZoomInstance) {
+                try { _wfPanZoomInstance.destroy(); } catch (ignored) {}
+                _wfPanZoomInstance = null;
+            }
+            if (typeof svgPanZoom !== 'function') return;
+            // Only init if SVG has actual content (not just placeholder text)
+            if (!wfGraphEl.querySelector('rect')) return;
+            _wfPanZoomInstance = svgPanZoom(wfGraphEl, {
+                zoomEnabled: true,
+                panEnabled: true,
+                controlIconsEnabled: false,
+                dblClickZoomEnabled: true,
+                mouseWheelZoomEnabled: true,
+                preventMouseEventsDefault: true,
+                zoomScaleSensitivity: 0.3,
+                minZoom: 0.25,
+                maxZoom: 8,
+                fit: true,
+                center: true
+            });
+        }
+
+        // Re-init pan/zoom whenever the graph is re-rendered
+        var _origRenderWorkflowGraph = renderWorkflowGraph;
+        renderWorkflowGraph = function (workflow, nodeStates) {
+            _origRenderWorkflowGraph(workflow, nodeStates);
+            // Delay init slightly so SVG content is settled in the DOM
+            setTimeout(_wfInitPanZoom, 50);
+        };
+
+        // ── DRAGGABLE NODES (capture-phase, coexists with svg-pan-zoom) ──
+        var _wfDragState = null; // { nodeId, groupEl, startX, startY, origPositions }
+
+        function _wfMoveNodeInSvg(groupEl, nodeId, newX, newY) {
+            // Direct SVG attribute mutation — no full re-render
+            var rect = groupEl.querySelector('rect');
+            if (rect) {
+                rect.setAttribute('x', String(newX));
+                rect.setAttribute('y', String(newY));
+            }
+            var texts = groupEl.querySelectorAll('text');
+            // Rebuild text positions relative to node
+            if (texts[0]) { texts[0].setAttribute('x', String(newX + 10)); texts[0].setAttribute('y', String(newY + 18)); }
+            if (texts[1]) { texts[1].setAttribute('x', String(newX + 10)); texts[1].setAttribute('y', String(newY + 33)); }
+            if (texts[2]) { texts[2].setAttribute('x', String(newX + 160)); texts[2].setAttribute('y', String(newY + 18)); }
+            if (texts[3]) { texts[3].setAttribute('x', String(newX + 160)); texts[3].setAttribute('y', String(newY + 33)); }
+        }
+
+        function _wfRedrawEdgesOnly() {
+            if (!_wfGraphMeta) return;
+            var positions = _wfGraphMeta.positions;
+            var connections = _wfGraphMeta.connections;
+            var nodeW = 170, nodeH = 50;
+            // Find all edge path groups
+            var svgEl = wfGraphEl;
+            connections.forEach(function (edge) {
+                var a = positions[edge.from];
+                var b = positions[edge.to];
+                if (!a || !b) return;
+                var sx = a.x + nodeW;
+                var sy = a.y + (nodeH / 2);
+                var tx = b.x;
+                var ty = b.y + (nodeH / 2);
+                var dx = Math.max(36, (tx - sx) * 0.45);
+                var path = 'M ' + sx + ' ' + sy + ' C ' + (sx + dx) + ' ' + sy + ', ' + (tx - dx) + ' ' + ty + ', ' + tx + ' ' + ty;
+                // Update all paths with this edge index
+                var pathEls = svgEl.querySelectorAll('[data-wf-edge-index="' + String(edge.index) + '"]');
+                pathEls.forEach(function (el) {
+                    if (el.tagName === 'path') el.setAttribute('d', path);
+                    if (el.tagName === 'text') {
+                        el.setAttribute('x', String((sx + tx) / 2));
+                        el.setAttribute('y', String(((sy + ty) / 2) - 6));
+                    }
+                });
+            });
+        }
+
+        wfGraphEl.addEventListener('pointerdown', function (e) {
+            var target = e.target;
+            if (!target || typeof target.closest !== 'function') return;
+            var nodeEl = target.closest('[data-wf-node-id]');
+            if (!nodeEl) return; // Not on a node — let svg-pan-zoom handle it
+
+            var nodeId = nodeEl.getAttribute('data-wf-node-id');
+            if (!nodeId || !_wfGraphMeta || !_wfGraphMeta.positions[nodeId]) return;
+
+            // Intercept: prevent svg-pan-zoom from starting a pan
+            e.stopPropagation();
+            e.preventDefault();
+
+            if (_wfPanZoomInstance) {
+                try { _wfPanZoomInstance.disablePan(); } catch (ignored) {}
+            }
+
+            var pos = _wfGraphMeta.positions[nodeId];
+            var zoom = _wfPanZoomInstance ? (_wfPanZoomInstance.getZoom() || 1) : 1;
+            _wfDragState = {
+                nodeId: nodeId,
+                groupEl: nodeEl,
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                origX: pos.x,
+                origY: pos.y,
+                zoom: zoom
+            };
+
+            nodeEl.style.cursor = 'grabbing';
+        }, true); // capture phase — fires before svg-pan-zoom bubble
+
+        document.addEventListener('pointermove', function (e) {
+            if (!_wfDragState) return;
+            var dx = (e.clientX - _wfDragState.startClientX) / _wfDragState.zoom;
+            var dy = (e.clientY - _wfDragState.startClientY) / _wfDragState.zoom;
+            var newX = _wfDragState.origX + dx;
+            var newY = _wfDragState.origY + dy;
+
+            // Update position in graph meta
+            _wfGraphMeta.positions[_wfDragState.nodeId] = { x: newX, y: newY };
+
+            // Move node visually
+            _wfMoveNodeInSvg(_wfDragState.groupEl, _wfDragState.nodeId, newX, newY);
+
+            // Redraw edges to follow
+            _wfRedrawEdgesOnly();
+        });
+
+        document.addEventListener('pointerup', function (e) {
+            if (!_wfDragState) return;
+            var nodeId = _wfDragState.nodeId;
+            var pos = _wfGraphMeta.positions[nodeId];
+
+            // Persist dragged position
+            var wfKey = _wfSelectedId || '_default';
+            if (!_wfNodePositions[wfKey]) _wfNodePositions[wfKey] = {};
+            _wfNodePositions[wfKey][nodeId] = { x: pos.x, y: pos.y };
+
+            _wfDragState.groupEl.style.cursor = 'grab';
+            _wfDragState = null;
+
+            if (_wfPanZoomInstance) {
+                try { _wfPanZoomInstance.enablePan(); } catch (ignored) {}
+            }
+        });
+    }
+
+    var wfSelectedLabel = document.getElementById('wfops-selected');
+    if (wfSelectedLabel) {
+        wfSelectedLabel.style.cursor = 'pointer';
+        wfSelectedLabel.title = 'Reset inspector to workflow overview';
+        wfSelectedLabel.addEventListener('click', function () {
+            _wfSelectWorkflowDrill();
+        });
+    }
+
     // ── MARKETPLACE SEARCH ──
     var mpSearchInput = document.getElementById('mp-search');
     var _mpSearchTimer = null;
@@ -1977,6 +3686,13 @@
             _mpSearchTimer = setTimeout(function () {
                 _mpFilter.search = mpSearchInput.value.trim();
                 renderWorkflowFeed();
+                // Debounced gist search (500ms after local filter)
+                clearTimeout(_gistSearchDebounce);
+                if (_mpFilter.search && _mpFilter.search.length >= 3) {
+                    _gistSearchDebounce = setTimeout(function () {
+                        vscode.postMessage({ command: 'requestGistSearch', query: _mpFilter.search });
+                    }, 500);
+                }
             }, 250);
         });
     }
@@ -1988,13 +3704,21 @@
             renderWorkflowFeed();
         });
     }
+    // ── MARKETPLACE SOURCE FILTER ──
+    var mpSourceFilter = document.getElementById('mp-source-filter');
+    if (mpSourceFilter) {
+        mpSourceFilter.addEventListener('change', function () {
+            _mpFilter.source = mpSourceFilter.value;
+            renderWorkflowFeed();
+        });
+    }
     // ── MARKETPLACE DOC TYPE PILLS (event delegation) ──
     var mpDtypeEl = document.getElementById('mp-doctype-pills');
     if (mpDtypeEl) {
         mpDtypeEl.addEventListener('click', function (e) {
             var pill = e.target.closest('[data-mp-dtype]');
             if (pill) {
-                _mpFilter.docType = pill.dataset.mpDtype;
+                _mpFilter.role = pill.dataset.mpDtype;
                 renderWorkflowFeed();
             }
         });
@@ -2057,20 +3781,115 @@
             if (modal) modal.classList.add('active');
             return;
         }
-        // Import button — dispatches per docType
+        // Import button — workflow-first import path
         var importBtn = e.target.closest('[data-wf-import]');
         if (importBtn) {
             try {
-                var docData = JSON.parse(importBtn.dataset.wfImport);
-                var dType = docData.docType || 'workflow';
-                var dBody = docData.body || docData.workflow || '';
-                var dName = docData.name || 'Untitled';
-                if (dType === 'workflow') {
-                    if (dBody) callTool('workflow_create', { definition: dBody });
-                } else {
-                    if (dBody) callTool('bag_induct', { key: dType + ':' + dName.toLowerCase().replace(/\s+/g, '-'), content: dBody, item_type: dType });
+                var eventId = importBtn.dataset.wfImport;
+                var sourceEvent = _workflowEvents.find(function (ev) { return ev.id === eventId; });
+                if (!sourceEvent) {
+                    mpToast('Import failed: listing not found', 'error', 4200);
+                    return;
                 }
-            } catch (err) { console.error('[Community] Import failed:', err); }
+
+                var parsedDoc = parseDocContent(sourceEvent);
+                var workflowDef = _workflowDefinitionForImport(parsedDoc, sourceEvent.id);
+                var workflowDefPayload = (typeof workflowDef === 'string')
+                    ? workflowDef
+                    : JSON.stringify(workflowDef);
+
+                var importSuffix = sourceEvent.id ? String(sourceEvent.id).slice(0, 12) : String(Date.now());
+                var importSlug = _slugifyName(parsedDoc.name || 'workflow');
+                var sourceArtifactKey = 'marketplace-source:' + importSlug + ':' + importSuffix;
+                var workingArtifactKey = 'marketplace-working:' + importSlug + ':' + importSuffix;
+                var sourceArtifactPayload = JSON.stringify({
+                    imported_at: new Date().toISOString(),
+                    source: 'nostr-marketplace',
+                    event: {
+                        id: sourceEvent.id || '',
+                        pubkey: sourceEvent.pubkey || '',
+                        created_at: sourceEvent.created_at || 0,
+                        tags: sourceEvent.tags || [],
+                        content: sourceEvent.content || ''
+                    },
+                    listing: {
+                        name: parsedDoc.name || '',
+                        description: parsedDoc.description || '',
+                        workflow_role: parsedDoc.workflowRole || 'automation',
+                        category: parsedDoc.category || 'other',
+                        source_doc_type: parsedDoc.sourceDocType || 'workflow',
+                        body_format: parsedDoc.bodyFormat || 'json',
+                        tags: parsedDoc.tags || []
+                    }
+                }, null, 2);
+
+                callTool('bag_induct', { key: sourceArtifactKey, content: sourceArtifactPayload, item_type: 'artifact' });
+                callTool('workflow_create', { definition: workflowDefPayload });
+                callTool('bag_induct', { key: workingArtifactKey, content: workflowDefPayload, item_type: 'json' });
+
+                if (parsedDoc.requiresWrapOnImport) {
+                    mpToast('Imported + inducted to FelixBag (legacy listing auto-wrapped)', 'info', 4200);
+                } else {
+                    mpToast('Workflow imported + source/working artifacts inducted', 'success', 3200);
+                }
+            } catch (err) {
+                console.error('[Community] Import failed:', err);
+                mpToast('Import failed: ' + (err && err.message ? err.message : 'invalid listing content'), 'error', 5000);
+            }
+            return;
+        }
+        // Gist detail view
+        var gistDetailBtn = e.target.closest('[data-gist-detail-id]');
+        if (gistDetailBtn && !e.target.closest('[data-gist-view]') && !e.target.closest('[data-gist-fork]') && !e.target.closest('[data-gist-save]')) {
+            var gId = gistDetailBtn.dataset.gistDetailId;
+            if (gId) { showGistDetail(gId.replace('gist:', '')); }
+            return;
+        }
+        var gistViewBtn = e.target.closest('[data-gist-view]');
+        if (gistViewBtn) {
+            showGistDetail(gistViewBtn.dataset.gistView);
+            return;
+        }
+        // Gist fork button
+        var gistForkBtn = e.target.closest('[data-gist-fork]');
+        if (gistForkBtn) {
+            if (!_ghAuthenticated) {
+                vscode.postMessage({ command: 'githubAuth' });
+                return;
+            }
+            vscode.postMessage({ command: 'githubForkGist', gistId: gistForkBtn.dataset.gistFork });
+            mpToast('Forking gist to your account...', 'info', 2000);
+            return;
+        }
+        // Gist save to memory
+        var gistSaveBtn = e.target.closest('[data-gist-save]');
+        if (gistSaveBtn) {
+            var saveId = gistSaveBtn.dataset.gistSave;
+            var saveItem = _gistMarketplaceItems.find(function (i) { return i.eventId === 'gist:' + saveId; });
+            if (saveItem) {
+                callTool('bag_induct', {
+                    key: 'gist:' + saveId,
+                    content: JSON.stringify(saveItem, null, 2),
+                    item_type: 'json'
+                });
+                mpToast('Saved to FelixBag memory', 'success', 2000);
+            }
+            return;
+        }
+        // Gist import as workflow
+        var gistImportWfBtn = e.target.closest('[data-gist-import-workflow]');
+        if (gistImportWfBtn) {
+            vscode.postMessage({ command: 'requestGistContent', gistId: gistImportWfBtn.dataset.gistImportWorkflow });
+            mpToast('Importing gist as workflow...', 'info', 2000);
+            return;
+        }
+        // Gist open on GitHub
+        var gistOpenBtn = e.target.closest('[data-gist-open]');
+        if (gistOpenBtn) {
+            var openItem = _gistMarketplaceItems.find(function (i) { return i.eventId === 'gist:' + gistOpenBtn.dataset.gistOpen; });
+            if (openItem) {
+                vscode.postMessage({ command: 'openExternal', url: 'https://gist.github.com/' + gistOpenBtn.dataset.gistOpen });
+            }
             return;
         }
         // Zap button (NIP-57 Lightning Zap) — with WebLN one-click support
@@ -2078,12 +3897,18 @@
         if (reactBtn) {
             var zapEventId = reactBtn.dataset.wfReact;
             var zapPubkey = reactBtn.dataset.wfPubkey;
+            if (!zapEventId || !zapPubkey) {
+                mpToast('Zap unavailable: listing is missing event or publisher metadata', 'error', 4600);
+                return;
+            }
             var amountStr = window.prompt('Zap amount in sats (e.g. 21, 100, 1000):', '21');
             if (!amountStr) return;
             var amountSats = parseInt(amountStr, 10);
             if (isNaN(amountSats) || amountSats < 1) { alert('Invalid amount'); return; }
             reactBtn.textContent = _weblnAvailable ? 'PAYING...' : 'ZAPPING...';
             reactBtn.disabled = true;
+            _pendingZap = { eventId: zapEventId, pubkey: zapPubkey, amountSats: amountSats };
+            mpToast('Preparing zap request...', 'info', 2600);
             vscode.postMessage({
                 command: 'nostrZap',
                 recipientPubkey: zapPubkey,
@@ -2091,10 +3916,7 @@
                 amountSats: amountSats,
                 comment: ''
             });
-            // Also still send a kind 7 reaction for backward compat
-            vscode.postMessage({ command: 'nostrReact', eventId: zapEventId, eventPubkey: zapPubkey, reaction: '\u26A1' });
-            // Track import rep for the publisher
-            vscode.postMessage({ command: 'nostrAddReputation', pubkey: zapPubkey, action: 'RECEIVE_ZAP', multiplier: 1 });
+            // Reputation and payment-side signaling are handled only by verified zap receipts.
             setTimeout(function () { reactBtn.textContent = _weblnAvailable ? '\u26A1 ZAP' : 'ZAP'; reactBtn.disabled = false; }, 3000);
         }
     });
@@ -2114,8 +3936,74 @@
     // ── LIGHTNING ADDRESS (lud16) SETUP ──
     var lud16SaveBtn = document.getElementById('lud16-save');
     var lud16TestBtn = document.getElementById('lud16-test');
+    var lud16CheckBtn = document.getElementById('lud16-check');
     var lud16Input = document.getElementById('lud16-input');
     var lud16Status = document.getElementById('lud16-status');
+    var zapReadinessEl = document.getElementById('zap-readiness');
+    var _pendingZapReadinessCheck = false;
+
+    function _isLud16Format(addr) {
+        return !!addr && addr.indexOf(' ') === -1 && addr.indexOf('@') > 0 && addr.indexOf('@') < addr.length - 1;
+    }
+
+    function _renderZapReadiness(opts) {
+        if (!zapReadinessEl) return;
+        var options = opts || {};
+        var addr = (lud16Input && lud16Input.value ? lud16Input.value : '').trim();
+        var identityOk = !!_nostrPubkey;
+        var relayOk = _nostrRelayCount > 0;
+        var lud16Ok = _isLud16Format(addr);
+        var checking = !!options.pending;
+        var lnurl = options.result || null;
+        var resolvedOk = !!(lnurl && lnurl.callback);
+        var nip57Ok = !!(lnurl && lnurl.allowsNostr);
+
+        var senderReady = identityOk && relayOk;
+        var receiverReady = lud16Ok && resolvedOk && nip57Ok;
+        var ready = senderReady && receiverReady;
+
+        var status = checking ? '[CHECKING]' : ready ? '[READY TO ZAP]' : '[NOT READY]';
+        var rangeText = resolvedOk
+            ? (Math.floor((lnurl.minSendable || 0) / 1000) + '-' + Math.floor((lnurl.maxSendable || 0) / 1000) + ' sats')
+            : '-';
+        var hint = '';
+        if (!identityOk) hint = 'Open Community and wait for your Nostr identity to load.';
+        else if (!relayOk) hint = 'Connect to at least one relay.';
+        else if (!lud16Ok) hint = 'Set lud16 like you@wallet.com, then SAVE.';
+        else if (!resolvedOk && !checking) hint = 'Click RUN ZAP CHECK to verify the wallet endpoint.';
+        else if (resolvedOk && !nip57Ok) hint = 'Receiver wallet must support Nostr zaps (NIP-57).';
+        else if (!ready && !checking) hint = 'Check wallet setup and try again.';
+
+        zapReadinessEl.innerHTML =
+            '<div style="font-weight:700;color:' + (ready ? 'var(--green)' : checking ? 'var(--amber)' : '#ef4444') + ';">' + status + '</div>' +
+            '<div>' + (identityOk ? '[OK]' : '[X]') + ' Sender has Nostr identity</div>' +
+            '<div>' + (relayOk ? '[OK]' : '[X]') + ' Sender connected to relay</div>' +
+            '<div>' + (lud16Ok ? '[OK]' : '[X]') + ' Receiver lud16 format</div>' +
+            '<div>' + (resolvedOk ? '[OK]' : '[X]') + ' Receiver wallet endpoint resolves</div>' +
+            '<div>' + (nip57Ok ? '[OK]' : '[X]') + ' Receiver supports Nostr zaps</div>' +
+            '<div>[MANUAL] Sender wallet has funds</div>' +
+            '<div style="color:var(--text-dim);">Allowed amount: ' + rangeText + '</div>' +
+            (hint ? '<div style="margin-top:4px;color:var(--amber);">Fix: ' + safeHTML(hint) + '</div>' : '');
+    }
+
+    if (lud16CheckBtn && lud16Input) {
+        lud16CheckBtn.addEventListener('click', function () {
+            var addr = lud16Input.value.trim();
+            _pendingZapReadinessCheck = true;
+            _renderZapReadiness({ pending: true });
+            if (!addr || !_isLud16Format(addr)) {
+                _pendingZapReadinessCheck = false;
+                if (lud16Status) {
+                    lud16Status.textContent = 'Invalid format. Expected: you@wallet.com';
+                    lud16Status.style.color = '#ef4444';
+                }
+                _renderZapReadiness({});
+                return;
+            }
+            if (lud16Status) { lud16Status.textContent = 'Checking full zap readiness...'; lud16Status.style.color = 'var(--text-dim)'; }
+            vscode.postMessage({ command: 'nostrResolveLud16', lud16: addr });
+        });
+    }
     if (lud16SaveBtn && lud16Input) {
         lud16SaveBtn.addEventListener('click', function () {
             var addr = lud16Input.value.trim();
@@ -2125,6 +4013,7 @@
             }
             vscode.postMessage({ command: 'nostrSetProfile', profile: { lud16: addr } });
             if (lud16Status) { lud16Status.textContent = 'Saved! Your Lightning address is now in your Nostr profile.'; lud16Status.style.color = 'var(--green)'; }
+            _renderZapReadiness({});
         });
     }
     if (lud16TestBtn && lud16Input) {
@@ -2135,6 +4024,8 @@
                 return;
             }
             if (lud16Status) { lud16Status.textContent = 'Testing...'; lud16Status.style.color = 'var(--text-dim)'; }
+            _pendingZapReadinessCheck = true;
+            _renderZapReadiness({ pending: true });
             vscode.postMessage({ command: 'nostrResolveLud16', lud16: addr });
         });
     }
@@ -2149,8 +4040,14 @@
                 lud16Status.textContent = 'Could not resolve "' + msg.lud16 + '". Check the address.';
                 lud16Status.style.color = '#ef4444';
             }
+            if (_pendingZapReadinessCheck) {
+                _pendingZapReadinessCheck = false;
+                _renderZapReadiness({ result: msg.result || null });
+            }
         }
     });
+
+    _renderZapReadiness({});
 
     // ── PROFILE BUTTON ──
     var profileBtn = document.getElementById('nostr-profile-btn');
@@ -2190,11 +4087,19 @@
         if (_pendingGistPublish) {
             var p = _pendingGistPublish;
             _pendingGistPublish = null;
+            if (!p.body) {
+                mpToast('Publish failed: missing document body after Gist creation', 'error', 5200);
+                return;
+            }
             vscode.postMessage({
-                command: 'nostrPublishWorkflow',
-                name: p.name, description: p.description, workflow: p.workflow,
+                command: 'nostrPublishDocument',
+                docType: 'workflow',
+                name: p.name,
+                description: p.description || '',
+                body: p.body,
                 tags: p.tags, category: p.category, version: p.version,
                 complexity: p.complexity, estTime: p.estTime,
+                bodyFormat: p.bodyFormat,
                 gistUrl: gist.url, gistId: gist.id
             });
         }
@@ -2246,16 +4151,95 @@
             console.error('[GitHub] Import failed: no workflow found in Gist');
             return;
         }
-        // Auto-populate the publish modal with imported data, or directly create the workflow
+        // Import directly into local workflow engine
         if (result.workflow) {
             try {
-                callTool('workflow_create', { definition: result.workflow });
+                var normalized = _normalizeWorkflowDefinition(result.workflow, {
+                    name: result.name || 'Imported Workflow',
+                    description: result.description || '',
+                    workflowRole: 'automation',
+                    category: 'other',
+                    sourceDocType: 'workflow'
+                });
+                if (!normalized) {
+                    mpToast('Gist import failed: expected workflow JSON with nodes[]', 'error', 5000);
+                    return;
+                }
+                var normalizedPayload = (typeof normalized === 'string')
+                    ? normalized
+                    : JSON.stringify(normalized);
+                callTool('workflow_create', { definition: normalizedPayload });
+                mpToast('Workflow imported from Gist', 'success', 3000);
                 console.log('[GitHub] Imported workflow:', result.name);
             } catch (err) { console.error('[GitHub] Import create failed:', err); }
         }
     }
     function handleMyGists(gists) {
         _myGists = gists || [];
+    }
+
+    function handleGistSearchResults(msg) {
+        if (msg.error) {
+            console.warn('[Gist Search] Error:', msg.error);
+            return;
+        }
+        var items = msg.items || [];
+        // Deduplicate by eventId
+        items.forEach(function (item) {
+            var existing = _gistMarketplaceItems.find(function (g) { return g.eventId === item.eventId; });
+            if (!existing) {
+                _gistMarketplaceItems.push(item);
+            }
+        });
+        renderWorkflowFeed();
+    }
+
+    function handleGistContentResult(msg) {
+        var loadingEl = document.getElementById('gist-content-loading');
+        var contentEl = document.getElementById('gist-content-area');
+        if (loadingEl) loadingEl.style.display = 'none';
+        if (!contentEl) return;
+
+        if (msg.error) {
+            contentEl.innerHTML = '<div style="color:#ef4444;font-size:10px;">Failed to load gist content: ' + safeHTML(msg.error) + '</div>';
+            return;
+        }
+
+        var gist = msg.gist;
+        if (!gist || !gist.files) {
+            contentEl.innerHTML = '<div style="color:var(--text-dim);font-size:10px;">No files found in gist.</div>';
+            return;
+        }
+
+        var html = '';
+        var fileNames = Object.keys(gist.files);
+        fileNames.forEach(function (fname) {
+            var file = gist.files[fname];
+            var lang = (file.language || '').toLowerCase();
+            html += '<div class="wf-detail-section">' +
+                '<div class="wf-detail-section-title">' + safeHTML(fname) +
+                (lang ? ' <span style="color:var(--text-dim);font-size:9px;">(' + lang + ')</span>' : '') +
+                (file.size ? ' <span style="color:var(--text-dim);font-size:9px;">' + file.size + ' bytes</span>' : '') +
+                '</div>' +
+                '<pre>' + safeHTML(file.content || '') + '</pre>' +
+                '</div>';
+        });
+
+        // Add workflow import button if it looks like a workflow
+        var hasWorkflow = fileNames.some(function (f) {
+            return f.toLowerCase().indexOf('workflow') !== -1 || f.toLowerCase().endsWith('.json');
+        });
+        if (hasWorkflow) {
+            html += '<div style="margin-top:8px;"><button class="btn-dim" data-gist-import-workflow="' + safeHTML(msg.gistId) + '">IMPORT AS WORKFLOW</button></div>';
+        }
+
+        contentEl.innerHTML = html;
+    }
+
+    function handleGistIndexingComplete(msg) {
+        if (msg.totalIndexed > 0) {
+            console.log('[Gist Indexing] Indexed ' + msg.totalIndexed + ' new gists');
+        }
     }
 
     // ── GITHUB AUTH BUTTON ──
@@ -2283,26 +4267,48 @@
     }
 
     function doPublishWorkflow() {
-        var docType = (document.getElementById('pub-wf-doctype') || {}).value || 'workflow';
-        var name = document.getElementById('pub-wf-name').value;
-        var desc = document.getElementById('pub-wf-desc').value;
-        var body = document.getElementById('pub-wf-json').value;
-        var tagsStr = document.getElementById('pub-wf-tags').value;
+        var role = (document.getElementById('pub-wf-role') || {}).value || 'automation';
+        var name = (((document.getElementById('pub-wf-name') || {}).value) || '').trim();
+        var desc = (((document.getElementById('pub-wf-desc') || {}).value) || '').trim();
+        var bodyInput = (((document.getElementById('pub-wf-json') || {}).value) || '').trim();
+        var tagsStr = (((document.getElementById('pub-wf-tags') || {}).value) || '').trim();
         var category = (document.getElementById('pub-wf-category') || {}).value || 'other';
         var version = (document.getElementById('pub-wf-version') || {}).value || '1.0.0';
         var complexity = (document.getElementById('pub-wf-complexity') || {}).value || 'moderate';
         var estTime = (document.getElementById('pub-wf-time') || {}).value || 'fast';
         var gistCheckbox = document.getElementById('pub-wf-gist');
         var backWithGist = gistCheckbox ? gistCheckbox.checked : false;
-        if (!name || !body) return;
-        var tags = tagsStr ? tagsStr.split(',').map(function (t) { return t.trim(); }).filter(Boolean) : [];
-        var bodyFormat = docType === 'workflow' ? 'json' : 'text';
+        if (!name || !bodyInput) {
+            mpToast('Name and content are required', 'error', 3200);
+            return;
+        }
 
-        var meta = { category: category, version: version, complexity: complexity, estTime: estTime, docType: docType, bodyFormat: bodyFormat };
+        var workflowDef = _normalizeWorkflowDefinition(bodyInput, {
+            name: name,
+            description: desc,
+            workflowRole: role,
+            category: category,
+            sourceDocType: 'workflow'
+        });
+        if (!workflowDef) {
+            mpToast('Workflow content must be valid JSON with a nodes[] array', 'error', 5000);
+            return;
+        }
+
+        var body = JSON.stringify(workflowDef, null, 2);
+        var tags = tagsStr ? tagsStr.split(',').map(function (t) { return t.trim(); }).filter(Boolean) : [];
+        var roleTag = 'workflow-role:' + role;
+        if (tags.indexOf(roleTag) === -1) tags.push(roleTag);
+        if (tags.indexOf('workflow') === -1) tags.push('workflow');
+        var bodyFormat = 'json';
+
+        var meta = { category: category, version: version, complexity: complexity, estTime: estTime, docType: 'workflow', bodyFormat: bodyFormat, workflowRole: role };
+
+        mpToast('Publishing workflow...', 'info', 10000);
 
         if (backWithGist && _ghAuthenticated) {
             _pendingGistPublish = {
-                name: name, description: desc, body: body, docType: docType,
+                name: name, description: desc, body: body, docType: 'workflow', workflowRole: role,
                 tags: tags, category: category, version: version,
                 complexity: complexity, estTime: estTime, bodyFormat: bodyFormat
             };
@@ -2314,7 +4320,7 @@
         } else {
             vscode.postMessage({
                 command: 'nostrPublishDocument',
-                docType: docType, name: name, description: desc, body: body,
+                docType: 'workflow', name: name, description: desc, body: body,
                 tags: tags, category: category, version: version,
                 complexity: complexity, estTime: estTime, bodyFormat: bodyFormat
             });
@@ -2322,24 +4328,6 @@
         closeModals();
     }
     window.doPublishWorkflow = doPublishWorkflow;
-
-    // Dynamic label update when docType changes
-    var pubDtSelect = document.getElementById('pub-wf-doctype');
-    if (pubDtSelect) {
-        pubDtSelect.addEventListener('change', function () {
-            var dt = pubDtSelect.value;
-            var label = document.getElementById('pub-wf-body-label');
-            var placeholder = document.getElementById('pub-wf-json');
-            if (label) {
-                var labels = { workflow: 'Workflow JSON (DAG definition)', skill: 'Skill Content (markdown)', playbook: 'Playbook Steps (markdown / text)', recipe: 'Recipe Content (text)' };
-                label.textContent = labels[dt] || 'Content';
-            }
-            if (placeholder) {
-                var placeholders = { workflow: '{"id":"my-wf","nodes":[...],"connections":[...]}', skill: '# My Skill\n\nDescription of what this skill does...', playbook: '## Step 1\nDo this first...\n\n## Step 2\nThen do this...', recipe: 'Ingredients and steps...' };
-                placeholder.placeholder = placeholders[dt] || 'Paste content here...';
-            }
-        });
-    }
 
     // ══════════════════════════════════════════════════════════════════
     // UX THEME ENGINE
@@ -2703,6 +4691,11 @@
     // ── INIT ──
     buildToolsRegistry();
     renderSlots([]);
+    renderWorkflowList();
+    renderWorkflowGraph(null, null);
+    renderWorkflowNodeStates(null, null);
+    _wfRenderDrillDetail();
+    _wfSetBadge('idle', 'IDLE');
 
     // Tell extension we're ready
     vscode.postMessage({ command: 'ready' });

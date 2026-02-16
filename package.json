@@ -2,7 +2,7 @@
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
   "description": "Local AI model orchestrator with 140+ MCP tools. Manage HuggingFace models, semantic memory, workflows, and developer collaboration.",
-  "version": "0.4.0",
+  "version": "0.6.4",
   "galleryBanner": {
     "color": "#1a1a2e",
     "theme": "dark"
@@ -131,10 +131,10 @@
         },
         "champion.maxSlots": {
           "type": "number",
-          "default": 8,
-          "description": "Maximum number of council slots (1-8)",
+          "default": 32,
+          "description": "Maximum number of council slots (1-32)",
           "minimum": 1,
-          "maximum": 8,
+          "maximum": 32,
           "order": 4
         },
         "champion.tools.coreInference": {
@@ -307,6 +307,37 @@
           "default": true,
           "description": "Share online presence with other community members",
           "order": 46
+        },
+        "champion.evaluation.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Track inference quality per model and council combination",
+          "order": 50
+        },
+        "champion.evaluation.autoRecord": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically record inference metrics for tracked tools",
+          "order": 51
+        },
+        "champion.ipfs.provider": {
+          "type": "string",
+          "enum": ["none", "pinata", "web3storage"],
+          "default": "none",
+          "description": "IPFS pinning provider for persisting CIDs (requires API key)",
+          "order": 55
+        },
+        "champion.ipfs.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key or JWT for the selected IPFS pinning provider",
+          "order": 56
+        },
+        "champion.ipfs.gateway": {
+          "type": "string",
+          "default": "",
+          "description": "Custom IPFS gateway URL (leave empty for provider default)",
+          "order": 57
         }
       }
     }
@@ -316,6 +347,10 @@
     "compile": "node esbuild.js",
     "compile:tsc": "tsc -p ./",
     "package": "node esbuild.js --production",
+    "vsix:list": "npx vsce ls",
+    "vsix:package": "npx vsce package",
+    "publish:vscode": "npx vsce publish",
+    "publish:openvsx": "npx ovsx publish",
     "compress-capsule": "node scripts/compress-capsule.js",
     "watch": "node esbuild.js --watch",
     "pretest": "npm run compile && npm run lint",
@@ -334,6 +369,7 @@
   },
   "dependencies": {
     "nostr-tools": "^2.23.1",
+    "svg-pan-zoom": "^3.6.2",
     "ws": "^8.19.0"
   }
 }

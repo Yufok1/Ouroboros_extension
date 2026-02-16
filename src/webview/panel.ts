@@ -2,6 +2,10 @@ import * as vscode from 'vscode';
 import { MCPServerManager, TOOL_CATEGORIES, ToolCallEvent } from '../mcpServer';
 import { NostrService, NostrEvent, PrivacySettings } from '../nostrService';
 import { GitHubService } from '../githubService';
+import { ModelEvaluator } from '../evaluation';
+import { ReputationChain } from '../reputationChain';
+import { MarketplaceIndex } from '../marketplaceSearch';
+import { IPFSPinningService } from '../ipfsPinning';
 
 type DiagnosticSource =
     | { kind: 'tool'; tool: string; args?: Record<string, any>; label?: string }
@@ -30,12 +34,17 @@ export class CouncilPanel {
 
     private nostrDisposable: vscode.Disposable | undefined;
 
+    private repChains: Map<string, ReputationChain> = new Map();
+
     constructor(
         private extensionUri: vscode.Uri,
         private mcp: MCPServerManager,
         private context: vscode.ExtensionContext,
         private nostr?: NostrService,
-        private github?: GitHubService
+        private github?: GitHubService,
+        private evaluator?: ModelEvaluator,
+        private marketSearch?: MarketplaceIndex,
+        private ipfs?: IPFSPinningService
     ) {
         // Capture activity events
         this.mcp.onActivity((event) => {
@@ -87,7 +96,8 @@ export class CouncilPanel {
             });
 
             // Start presence heartbeat and DM/presence subscriptions
-            this.nostr.startPresenceHeartbeat();
+            const presenceInterval = this.nostr.startPresenceHeartbeat();
+            this.disposables.push({ dispose: () => clearInterval(presenceInterval) });
             this.nostr.fetchDMs();
             this.nostr.fetchPresence();
         }
@@ -107,6 +117,7 @@ export class CouncilPanel {
         }
 
         const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js');
+        const svgPanZoomPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'svg-pan-zoom.min.js');
 
         this.panel = vscode.window.createWebviewPanel(
             'championCouncil', 'Champion Council', vscode.ViewColumn.One,
@@ -118,7 +129,8 @@ export class CouncilPanel {
         );
 
         const scriptUri = this.panel.webview.asWebviewUri(mediaPath);
-        this.panel.webview.html = this.buildHTML(scriptUri);
+        const svgPanZoomUri = this.panel.webview.asWebviewUri(svgPanZoomPath);
+        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri);
 
         this.panel.webview.onDidReceiveMessage(
             (msg) => {
@@ -143,7 +155,16 @@ export class CouncilPanel {
             this.pushSyncState();
         }, 5000);
         this.disposables.push({ dispose: () => clearInterval(syncInterval) });
+
+        // Live data poll (slots, status) — detects external changes
+        const liveInterval = setInterval(() => {
+            if (!this.panel || this.mcp.status !== 'running') { return; }
+            this.fetchLiveToolData().catch(() => {});
+        }, 5000);
+        this.disposables.push({ dispose: () => clearInterval(liveInterval) });
     }
+
+    private _lastSeenExecIds: Set<string> = new Set();
 
     private async fetchLiveToolData() {
         if (this._fetchingLiveData) { return; }
@@ -153,9 +174,10 @@ export class CouncilPanel {
             this.send({ type: 'capsuleStatus', data: status });
         } catch { /* server may be busy */ }
         try {
-            const slots = await this.mcp.callTool('list_slots', {}, { suppressActivity: true, source: 'internal' });
+            const slots = await this.mcp.callToolParsed('list_slots', {}, { suppressActivity: true, source: 'internal' });
             this.send({ type: 'slots', data: slots });
         } catch { /* ignore */ }
+
         this._fetchingLiveData = false;
     }
 
@@ -212,13 +234,21 @@ export class CouncilPanel {
         this.pushSyncState();
         // Trigger one immediate live fetch (no background polling loop).
         this.fetchLiveToolData().catch(() => {});
+        // Push persisted gist marketplace items so they appear immediately
+        if (this.marketSearch) {
+            const allItems = this.marketSearch.getAllItems();
+            const gistItems = allItems.filter(item => item.source === 'gist');
+            if (gistItems.length > 0) {
+                this.send({ type: 'gistSearchResults', items: gistItems, indexed: 0, query: '__restore__' });
+            }
+        }
     }
 
     private async handleMessage(msg: any) {
         switch (msg.command) {
             case 'callTool': {
                 try {
-                    const result = await this.mcp.callTool(msg.tool, msg.args || {});
+                    const result = await this.callToolParsed(msg.tool, msg.args || {});
                     this.send({ type: 'toolResult', id: msg.id, data: result });
                 } catch (err: any) {
                     this.send({ type: 'toolResult', id: msg.id, error: err.message });
@@ -242,9 +272,19 @@ export class CouncilPanel {
             case 'refresh':
                 await this.pushFullState();
                 break;
+            case 'fetchToolSchemas': {
+                try {
+                    const result = await this.mcp.listTools();
+                    const tools = result?.tools || result || [];
+                    this.send({ type: 'toolSchemas', tools });
+                } catch (err: any) {
+                    this.send({ type: 'toolSchemas', tools: [], error: err.message });
+                }
+                break;
+            }
             case 'refreshMemoryCatalog': {
                 try {
-                    const result = await this.mcp.callTool('bag_catalog', {}, { suppressActivity: true, source: 'internal' });
+                    const result = await this.callToolParsed('bag_catalog', {}, { suppressActivity: true, source: 'internal' });
                     this.send({ type: 'memoryCatalog', data: result });
                 } catch (err: any) {
                     this.send({ type: 'memoryCatalog', error: err.message });
@@ -300,52 +340,64 @@ export class CouncilPanel {
                 break;
             }
             case 'nostrPublishWorkflow': {
-                if (this.nostr && msg.name && msg.workflow) {
-                    try {
-                        const event = await this.nostr.publishWorkflow(
-                            msg.name,
-                            msg.description || '',
-                            msg.workflow,
-                            msg.tags || [],
-                            {
-                                category: msg.category,
-                                version: msg.version,
-                                complexity: msg.complexity,
-                                estTime: msg.estTime,
-                                gistUrl: msg.gistUrl,
-                                gistId: msg.gistId
-                            }
-                        );
-                        this.send({ type: 'nostrWorkflowPublished', event });
-                    } catch (err: any) {
-                        this.send({ type: 'nostrError', error: err.message });
-                    }
+                if (!this.nostr) {
+                    this.send({ type: 'nostrError', error: 'Nostr service is unavailable. Check identity/relay initialization.' });
+                    break;
+                }
+                if (!msg.name || !msg.workflow) {
+                    this.send({ type: 'nostrError', error: 'Name and workflow JSON are required to publish a workflow.' });
+                    break;
+                }
+                try {
+                    const event = await this.nostr.publishWorkflow(
+                        msg.name,
+                        msg.description || '',
+                        msg.workflow,
+                        msg.tags || [],
+                        {
+                            category: msg.category,
+                            version: msg.version,
+                            complexity: msg.complexity,
+                            estTime: msg.estTime,
+                            gistUrl: msg.gistUrl,
+                            gistId: msg.gistId
+                        }
+                    );
+                    this.send({ type: 'nostrWorkflowPublished', event });
+                } catch (err: any) {
+                    this.send({ type: 'nostrError', error: err.message });
                 }
                 break;
             }
             case 'nostrPublishDocument': {
-                if (this.nostr && msg.name && msg.body) {
-                    try {
-                        const event = await this.nostr.publishDocument(
-                            msg.docType || 'workflow',
-                            msg.name,
-                            msg.description || '',
-                            msg.body,
-                            msg.tags || [],
-                            {
-                                category: msg.category,
-                                version: msg.version,
-                                complexity: msg.complexity,
-                                estTime: msg.estTime,
-                                bodyFormat: msg.bodyFormat,
-                                gistUrl: msg.gistUrl,
-                                gistId: msg.gistId
-                            }
-                        );
-                        this.send({ type: 'nostrDocumentPublished', event, docType: msg.docType || 'workflow' });
-                    } catch (err: any) {
-                        this.send({ type: 'nostrError', error: err.message });
-                    }
+                if (!this.nostr) {
+                    this.send({ type: 'nostrError', error: 'Nostr service is unavailable. Check identity/relay initialization.' });
+                    break;
+                }
+                if (!msg.name || !msg.body) {
+                    this.send({ type: 'nostrError', error: 'Name and body are required to publish a document.' });
+                    break;
+                }
+                try {
+                    const event = await this.nostr.publishDocument(
+                        msg.docType || 'workflow',
+                        msg.name,
+                        msg.description || '',
+                        msg.body,
+                        msg.tags || [],
+                        {
+                            category: msg.category,
+                            version: msg.version,
+                            complexity: msg.complexity,
+                            estTime: msg.estTime,
+                            bodyFormat: msg.bodyFormat,
+                            gistUrl: msg.gistUrl,
+                            gistId: msg.gistId
+                        }
+                    );
+                    this.send({ type: 'nostrDocumentPublished', event, docType: msg.docType || 'workflow' });
+                } catch (err: any) {
+                    this.send({ type: 'nostrError', error: 'Publish failed: ' + (err?.message || String(err)) });
                 }
                 break;
             }
@@ -369,42 +421,89 @@ export class CouncilPanel {
             }
             // ── ZAP COMMANDS (NIP-57) ──
             case 'nostrZap': {
-                if (this.nostr && msg.recipientPubkey && msg.eventId && msg.amountSats) {
-                    try {
-                        const amountMsats = msg.amountSats * 1000;
-                        // Step 1: Get recipient profile to find their lud16
-                        const profile = await this.nostr.getProfile(msg.recipientPubkey);
-                        const lud16 = profile?.lud16;
-                        if (!lud16) {
-                            this.send({ type: 'nostrZapResult', success: false, error: 'Recipient has no Lightning address (lud16) in their profile.' });
-                            break;
+                if (!this.nostr) {
+                    this.send({ type: 'nostrZapResult', success: false, error: 'Nostr service is unavailable.' });
+                    break;
+                }
+                if (!msg.recipientPubkey || !msg.eventId || !msg.amountSats) {
+                    this.send({
+                        type: 'nostrZapResult',
+                        success: false,
+                        error: 'Missing zap data (recipient pubkey, event id, or amount).'
+                    });
+                    break;
+                }
+                if (!this.nostr.connected) {
+                    this.send({ type: 'nostrZapResult', success: false, error: 'No relay connection. Connect to at least one relay and retry.' });
+                    break;
+                }
+                const HEX64_RE = /^[0-9a-f]{64}$/i;
+                if (!HEX64_RE.test(String(msg.recipientPubkey)) || !HEX64_RE.test(String(msg.eventId))) {
+                    this.send({ type: 'nostrZapResult', success: false, error: 'Invalid zap target (recipient or event id is malformed).' });
+                    break;
+                }
+                if (String(msg.recipientPubkey).toLowerCase() === this.nostr.getPublicKey().toLowerCase()) {
+                    this.send({ type: 'nostrZapResult', success: false, error: 'Self-zaps are disabled to prevent reputation abuse.' });
+                    break;
+                }
+                const amountSats = Number(msg.amountSats);
+                if (!Number.isInteger(amountSats) || amountSats < 1) {
+                    this.send({ type: 'nostrZapResult', success: false, error: 'Invalid amount. Enter a whole number of sats greater than 0.' });
+                    break;
+                }
+                try {
+                    const amountMsats = amountSats * 1000;
+                    // Step 1: Get recipient profile to find their lud16
+                    let profile = this.nostr.getProfile(msg.recipientPubkey);
+                    if (!profile) {
+                        const fetchedProfile = await this.nostr.fetchProfileFromRelays(msg.recipientPubkey);
+                        if (fetchedProfile) {
+                            profile = fetchedProfile;
                         }
-                        // Step 2: Resolve lud16 to LNURL callback
-                        const lnurl = await this.nostr.resolveLud16(lud16);
-                        if (!lnurl || !lnurl.callback) {
-                            this.send({ type: 'nostrZapResult', success: false, error: `Could not resolve Lightning address: ${lud16}` });
-                            break;
-                        }
-                        if (amountMsats < lnurl.minSendable || amountMsats > lnurl.maxSendable) {
-                            this.send({ type: 'nostrZapResult', success: false, error: `Amount out of range (${lnurl.minSendable/1000}-${lnurl.maxSendable/1000} sats)` });
-                            break;
-                        }
-                        // Step 3: Create zap request event
-                        const zapRequest = await this.nostr.createZapRequest(msg.recipientPubkey, msg.eventId, amountMsats, msg.comment || '');
-                        // Step 4: Request invoice
-                        let invoice: string | null = null;
-                        if (lnurl.allowsNostr) {
-                            invoice = await this.nostr.requestZapInvoice(lnurl.callback, zapRequest, amountMsats);
-                        }
-                        this.send({
-                            type: 'nostrZapResult', success: true,
-                            invoice: invoice, lud16: lud16,
-                            amountSats: msg.amountSats,
-                            zapRequestId: zapRequest.id
-                        });
-                    } catch (err: any) {
-                        this.send({ type: 'nostrZapResult', success: false, error: err.message });
                     }
+                    const lud16 = String(profile?.lud16 || '').trim();
+                    if (!lud16) {
+                        this.send({ type: 'nostrZapResult', success: false, error: 'Recipient has no Lightning address (lud16) in their profile.' });
+                        break;
+                    }
+                    if (!lud16.includes('@')) {
+                        this.send({ type: 'nostrZapResult', success: false, error: 'Recipient Lightning address is malformed.' });
+                        break;
+                    }
+                    // Step 2: Resolve lud16 to LNURL callback
+                    const lnurl = await this.nostr.resolveLud16(lud16);
+                    if (!lnurl || !lnurl.callback) {
+                        this.send({ type: 'nostrZapResult', success: false, error: `Could not resolve Lightning address: ${lud16}` });
+                        break;
+                    }
+                    if (!lnurl.allowsNostr) {
+                        this.send({ type: 'nostrZapResult', success: false, error: 'Recipient wallet does not support Nostr zaps (NIP-57).' });
+                        break;
+                    }
+                    if (lnurl.nostrPubkey && lnurl.nostrPubkey.toLowerCase() !== String(msg.recipientPubkey).toLowerCase()) {
+                        this.send({ type: 'nostrZapResult', success: false, error: 'Lightning endpoint ownership mismatch. Zap blocked for safety.' });
+                        break;
+                    }
+                    if (amountMsats < lnurl.minSendable || amountMsats > lnurl.maxSendable) {
+                        this.send({ type: 'nostrZapResult', success: false, error: `Amount out of range (${lnurl.minSendable/1000}-${lnurl.maxSendable/1000} sats)` });
+                        break;
+                    }
+                    // Step 3: Create zap request event
+                    const zapRequest = await this.nostr.createZapRequest(msg.recipientPubkey, msg.eventId, amountMsats, msg.comment || '');
+                    // Step 4: Request invoice
+                    const invoice = await this.nostr.requestZapInvoice(lnurl.callback, zapRequest, amountMsats);
+                    if (!invoice) {
+                        this.send({ type: 'nostrZapResult', success: false, error: 'Recipient wallet did not return a payable invoice.' });
+                        break;
+                    }
+                    this.send({
+                        type: 'nostrZapResult', success: true,
+                        invoice: invoice, lud16: lud16,
+                        amountSats: amountSats,
+                        zapRequestId: zapRequest.id
+                    });
+                } catch (err: any) {
+                    this.send({ type: 'nostrZapResult', success: false, error: err.message });
                 }
                 break;
             }
@@ -757,6 +856,265 @@ export class CouncilPanel {
             case 'uxResetSettings': {
                 await this.context.globalState.update('champion.uxSettings', {});
                 this.send({ type: 'uxSettings', settings: {} });
+                break;
+            }
+
+            // ── Evaluation (Cross-Model Metrics) ─────────────────────
+
+            case 'evalGetMetrics': {
+                if (!this.evaluator) { this.send({ type: 'evalMetrics', error: 'Evaluator not available' }); break; }
+                const slotId = msg.slotId as number | undefined;
+                if (slotId !== undefined) {
+                    this.send({ type: 'evalMetrics', metrics: this.evaluator.evaluate(slotId) });
+                } else {
+                    const activeSlots = this.evaluator.getActiveSlots();
+                    const allMetrics = activeSlots.map(id => this.evaluator!.evaluate(id));
+                    this.send({ type: 'evalMetrics', metrics: allMetrics });
+                }
+                break;
+            }
+            case 'evalGetCouncil': {
+                if (!this.evaluator) { this.send({ type: 'evalCouncil', error: 'Evaluator not available' }); break; }
+                const slotIds = msg.slotIds as number[] || this.evaluator.getActiveSlots();
+                this.send({ type: 'evalCouncil', council: this.evaluator.evaluateCouncil(slotIds) });
+                break;
+            }
+            case 'evalCompare': {
+                if (!this.evaluator) { this.send({ type: 'evalCompare', error: 'Evaluator not available' }); break; }
+                this.send({ type: 'evalCompare', comparison: this.evaluator.compare(msg.slotA, msg.slotB) });
+                break;
+            }
+            case 'evalGetBestCombo': {
+                if (!this.evaluator) { this.send({ type: 'evalBestCombo', error: 'Evaluator not available' }); break; }
+                this.send({ type: 'evalBestCombo', combo: this.evaluator.getBestCombo(msg.maxSlots || 3) });
+                break;
+            }
+            case 'evalGetHistory': {
+                if (!this.evaluator) { this.send({ type: 'evalHistory', error: 'Evaluator not available' }); break; }
+                this.send({ type: 'evalHistory', records: this.evaluator.getHistory(msg.slotId, msg.limit || 50) });
+                break;
+            }
+            case 'evalExportReport': {
+                if (!this.evaluator) { this.send({ type: 'evalReport', error: 'Evaluator not available' }); break; }
+                this.send({ type: 'evalReport', report: this.evaluator.exportReport() });
+                break;
+            }
+            case 'evalRegisterSlot': {
+                if (!this.evaluator) { break; }
+                this.evaluator.registerSlot(msg.slotId, msg.model);
+                break;
+            }
+
+            // ── Reputation Chain ─────────────────────────────────────
+
+            case 'repChainAppend': {
+                const pubkey = msg.pubkey as string;
+                if (!pubkey) { break; }
+                let chain = this.repChains.get(pubkey);
+                if (!chain) {
+                    // Try loading from globalState
+                    const saved = this.context.globalState.get<any>(`champion.repChain.${pubkey}`);
+                    chain = saved ? ReputationChain.fromJSON(saved) : new ReputationChain(pubkey);
+                    this.repChains.set(pubkey, chain);
+                }
+                const entry = chain.append(msg.action, msg.subjectPubkey || pubkey, msg.metadata || {});
+                // Cap in-memory rep chains (marathon session hardening)
+                if (this.repChains.size > 100) {
+                    const oldest = this.repChains.keys().next().value;
+                    if (oldest !== undefined) { this.repChains.delete(oldest); }
+                }
+                this.context.globalState.update(`champion.repChain.${pubkey}`, chain.toJSON());
+                this.send({ type: 'repChainEntry', entry, summary: chain.summary() });
+                break;
+            }
+            case 'repChainVerify': {
+                const pubkey2 = msg.pubkey as string;
+                if (!pubkey2) { break; }
+                const chain2 = this.repChains.get(pubkey2);
+                if (!chain2) {
+                    this.send({ type: 'repChainVerify', result: { valid: false, length: 0, reason: 'Chain not found' } });
+                    break;
+                }
+                this.send({ type: 'repChainVerify', result: chain2.verify() });
+                break;
+            }
+            case 'repChainGet': {
+                const pubkey3 = msg.pubkey as string;
+                if (!pubkey3) { break; }
+                let chain3 = this.repChains.get(pubkey3);
+                if (!chain3) {
+                    const saved3 = this.context.globalState.get<any>(`champion.repChain.${pubkey3}`);
+                    chain3 = saved3 ? ReputationChain.fromJSON(saved3) : new ReputationChain(pubkey3);
+                    this.repChains.set(pubkey3, chain3);
+                }
+                this.send({
+                    type: 'repChainData',
+                    summary: chain3.summary(),
+                    length: chain3.getLength(),
+                    level: chain3.getLevelLabel(),
+                    points: chain3.getTotalPoints(),
+                    verified: chain3.verify()
+                });
+                break;
+            }
+            case 'repChainToNostr': {
+                const pubkey4 = msg.pubkey as string;
+                const chain4 = this.repChains.get(pubkey4);
+                if (!chain4) { this.send({ type: 'repChainNostr', error: 'Chain not found' }); break; }
+                this.send({ type: 'repChainNostr', events: chain4.toNostrEvents() });
+                break;
+            }
+
+            // ── Marketplace Semantic Search ───────────────────────────
+
+            case 'marketplaceSearch': {
+                if (!this.marketSearch) { this.send({ type: 'marketplaceResults', error: 'Search not available' }); break; }
+                try {
+                    let results = await this.marketSearch.search(msg.query, msg.limit || 20);
+                    if (msg.rerank && results.length > 1) {
+                        results = await this.marketSearch.rerank(msg.query, results);
+                    }
+                    this.send({ type: 'marketplaceResults', results, query: msg.query });
+                } catch (err: any) {
+                    this.send({ type: 'marketplaceResults', error: err.message, query: msg.query });
+                }
+                break;
+            }
+            case 'marketplaceIndex': {
+                if (!this.marketSearch) { break; }
+                this.marketSearch.indexDocument(
+                    msg.eventId, msg.pubkey, msg.name, msg.description,
+                    msg.body, msg.docType, msg.tags || [], msg.category || 'other',
+                    msg.bodyFormat || 'json', msg.version, msg.contentCID, msg.createdAt
+                );
+                this.send({ type: 'marketplaceIndexed', eventId: msg.eventId });
+                break;
+            }
+            case 'marketplaceEmbedPending': {
+                if (!this.marketSearch) { break; }
+                try {
+                    const embedded = await this.marketSearch.embedPending();
+                    this.send({ type: 'marketplaceEmbedResult', embedded });
+                } catch (err: any) {
+                    this.send({ type: 'marketplaceEmbedResult', error: err.message });
+                }
+                break;
+            }
+            case 'marketplaceGetStats': {
+                if (!this.marketSearch) { break; }
+                this.send({ type: 'marketplaceStats', stats: this.marketSearch.getStats() });
+                break;
+            }
+
+            // ── Public Gist Search (marketplace population) ──────────
+
+            case 'requestGistSearch': {
+                if (!this.github || !this.marketSearch) {
+                    this.send({ type: 'gistSearchResults', items: [], error: 'GitHub or search not available' });
+                    break;
+                }
+                try {
+                    const { normalizeGistToMarketplaceItem, indexGistBatch } = await import('../marketplaceSearch');
+                    const gists = await this.github.searchPublicGists(msg.query, {
+                        docType: msg.docType,
+                        language: msg.language,
+                        page: msg.page,
+                        perPage: msg.perPage
+                    });
+                    const indexed = await indexGistBatch(gists, this.marketSearch);
+                    // Send normalized items back for immediate display
+                    const items = gists.map(g => normalizeGistToMarketplaceItem(g));
+                    this.send({ type: 'gistSearchResults', items, indexed, query: msg.query });
+                } catch (err: any) {
+                    this.send({ type: 'gistSearchResults', items: [], error: err.message, query: msg.query });
+                }
+                break;
+            }
+            case 'requestGistContent': {
+                if (!this.github) {
+                    this.send({ type: 'gistContentResult', error: 'GitHub not available' });
+                    break;
+                }
+                try {
+                    const gistInfo = await this.github.fetchGistContent(msg.gistId);
+                    this.send({ type: 'gistContentResult', gistId: msg.gistId, gist: gistInfo });
+                } catch (err: any) {
+                    this.send({ type: 'gistContentResult', gistId: msg.gistId, error: err.message });
+                }
+                break;
+            }
+            case 'triggerGistIndexing': {
+                // Background indexing with pre-seeded queries
+                if (!this.github || !this.marketSearch) { break; }
+                const { normalizeGistToMarketplaceItem, indexGistBatch } = await import('../marketplaceSearch');
+                const queries = [
+                    'workflow automation pipeline',
+                    'solidity smart contract',
+                    'ERC20 token contract',
+                    'defi uniswap swap',
+                    'python machine learning',
+                    'ai agent langchain',
+                    'hardhat deploy script',
+                    'NFT ERC721 mint'
+                ];
+                let totalIndexed = 0;
+                const allItems: any[] = [];
+                for (const q of queries) {
+                    try {
+                        const gists = await this.github.searchPublicGists(q, { perPage: 10 });
+                        totalIndexed += await indexGistBatch(gists, this.marketSearch);
+                        // Send each batch of items to the webview immediately for live display
+                        const items = gists.map(g => normalizeGistToMarketplaceItem(g));
+                        allItems.push(...items);
+                        if (items.length > 0) {
+                            this.send({ type: 'gistSearchResults', items, indexed: items.length, query: q });
+                        }
+                    } catch { /* skip failed queries */ }
+                }
+                if (totalIndexed > 0) {
+                    this.marketSearch.embedPending().catch(() => {});
+                }
+                this.send({ type: 'gistIndexingComplete', totalIndexed, totalItems: allItems.length });
+                break;
+            }
+
+            case 'openExternal': {
+                if (msg.url) {
+                    vscode.env.openExternal(vscode.Uri.parse(msg.url));
+                }
+                break;
+            }
+
+            // ── IPFS Pinning ─────────────────────────────────────────
+
+            case 'ipfsPin': {
+                if (!this.ipfs) { this.send({ type: 'ipfsPinResult', error: 'Pinning not available' }); break; }
+                try {
+                    const pinResult = await this.ipfs.pin(msg.cid, msg.content, msg.name);
+                    this.send({ type: 'ipfsPinResult', ...pinResult });
+                } catch (err: any) {
+                    this.send({ type: 'ipfsPinResult', success: false, error: err.message });
+                }
+                break;
+            }
+            case 'ipfsIsPinned': {
+                if (!this.ipfs) { this.send({ type: 'ipfsPinnedStatus', pinned: false }); break; }
+                this.send({ type: 'ipfsPinnedStatus', cid: msg.cid, pinned: this.ipfs.isPinned(msg.cid) });
+                break;
+            }
+            case 'ipfsGetGatewayUrl': {
+                if (!this.ipfs) { break; }
+                this.send({ type: 'ipfsGatewayUrl', cid: msg.cid, url: this.ipfs.getGatewayUrl(msg.cid) });
+                break;
+            }
+            case 'ipfsListPins': {
+                if (!this.ipfs) { this.send({ type: 'ipfsPinList', pins: [] }); break; }
+                this.send({ type: 'ipfsPinList', pins: this.ipfs.listPins(msg.limit || 100) });
+                break;
+            }
+            case 'ipfsGetStats': {
+                if (!this.ipfs) { break; }
+                this.send({ type: 'ipfsStats', stats: this.ipfs.getStats() });
                 break;
             }
         }
@@ -1573,7 +1931,7 @@ export class CouncilPanel {
     // HTML Generation - Operations Facility UI
     // ═══════════════════════════════════════════════════════════════
 
-    private buildHTML(scriptUri: vscode.Uri): string {
+    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri): string {
         const toolRegistryJSON = JSON.stringify(TOOL_CATEGORIES);
 
         return `<!DOCTYPE html>
@@ -1613,6 +1971,7 @@ export class CouncilPanel {
     --ux-opacity-dim: 0.55;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
 body {
     font-family: var(--mono);
     background: var(--vscode-editor-background, #0a0a1a);
@@ -1621,6 +1980,8 @@ body {
     line-height: var(--ux-line-height);
     overflow-x: hidden;
     transition: font-size var(--ux-transition), color var(--ux-transition);
+    display: flex;
+    flex-direction: column;
 }
 body.reduce-motion, body.reduce-motion * { transition: none !important; animation: none !important; }
 
@@ -1683,8 +2044,14 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
 }
 
 /* ── CONTENT ── */
+.content-wrapper {
+    flex: 1;
+    overflow-y: auto;
+    position: relative;
+    min-height: 0;
+}
 .content { padding: 20px; display: none; }
-.content.active { display: block; }
+.content.active { display: flex; flex-direction: column; min-height: 100%; }
 
 /* ── OVERVIEW TAB ── */
 .arch-flow {
@@ -1828,6 +2195,42 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     transition: opacity 0.2s;
 }
 .copy-toast.show { opacity: 1; }
+.mp-toast {
+    position: fixed;
+    right: 14px;
+    bottom: 14px;
+    z-index: 10000;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none;
+}
+.mp-toast.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+.mp-toast.success {
+    border-color: #1d8246;
+    background: #123c25;
+    color: #deffed;
+}
+.mp-toast.error {
+    border-color: #b43a45;
+    background: #3f1b21;
+    color: #ffd9df;
+}
+.mp-toast.info {
+    border-color: #2f6bc8;
+    background: #162941;
+    color: #deecff;
+}
 .cat-bar-count { width: 30px; color: var(--text-dim); }
 
 /* ── COUNCIL TAB ── */
@@ -1835,6 +2238,24 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 12px;
+}
+.council-state-legend {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 8px 0 12px;
+}
+.council-state-legend .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-dim);
+    font-size: 9px;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
 }
 .slot-card {
     border: 1px solid var(--border);
@@ -1845,6 +2266,10 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
 }
 .slot-card.occupied {
     border-color: var(--accent);
+    border-left-width: 3px;
+}
+.slot-card.plugging {
+    border-color: var(--amber);
     border-left-width: 3px;
 }
 .slot-num {
@@ -1863,6 +2288,26 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     display: flex;
     align-items: center;
     gap: 6px;
+}
+.slot-status-badge {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 9px;
+    line-height: 1.3;
+}
+.slot-status-badge.plugged {
+    border-color: var(--green);
+    color: var(--green);
+}
+.slot-status-badge.plugging {
+    border-color: var(--amber);
+    color: var(--amber);
+}
+.slot-status-badge.empty {
+    color: var(--text-dim);
 }
 .slot-model-name {
     font-size: 11px;
@@ -1887,6 +2332,45 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     flex-wrap: wrap;
 }
 
+/* Plug progress banner */
+.plug-progress-banner {
+    display: none;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--amber);
+    border-radius: 6px;
+    margin-bottom: 12px;
+}
+.plug-progress-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+.plug-elapsed { color: var(--text-dim); font-size: 11px; }
+.plug-bar {
+    width: 100%;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+.plug-bar-fill {
+    height: 100%;
+    width: 40%;
+    background: var(--amber);
+    border-radius: 2px;
+    animation: plugSlide 1.5s ease-in-out infinite;
+}
+@keyframes plugSlide {
+    0% { transform: translateX(-100%); width: 40%; }
+    50% { transform: translateX(100%); width: 60%; }
+    100% { transform: translateX(250%); width: 40%; }
+}
+
 /* ── MEMORY TAB ── */
 .memory-stats {
     display: flex;
@@ -1907,7 +2391,8 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
 }
 .memory-list {
     border: 1px solid var(--border);
-    max-height: 400px;
+    flex: 1;
+    min-height: 120px;
     overflow-y: auto;
 }
 .memory-item {
@@ -1976,7 +2461,8 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
 
 /* ── ACTIVITY TAB ── */
 .activity-feed {
-    max-height: 500px;
+    flex: 1;
+    min-height: 120px;
     overflow-y: auto;
     border: 1px solid var(--border);
 }
@@ -1984,8 +2470,12 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     font-size: 11px;
+    cursor: pointer;
 }
 .activity-entry:hover { background: var(--surface2); }
+.activity-entry .activity-expand-hint { float: right; color: var(--text-dim); font-size: 9px; opacity: 0; transition: opacity 0.15s; }
+.activity-entry:hover .activity-expand-hint { opacity: 1; }
+.activity-entry.expanded .activity-expand-hint { opacity: 1; }
 .activity-ts { color: var(--text-dim); font-size: 10px; }
 .activity-tool { color: var(--accent); font-weight: 600; }
 .activity-cat {
@@ -1997,25 +2487,342 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     letter-spacing: 0.5px;
     margin-left: 6px;
 }
-.activity-duration { color: var(--text-dim); float: right; }
+.activity-duration { color: var(--text-dim); margin-left: 8px; }
 .activity-detail {
-    margin-top: 4px;
-    padding: 6px 8px;
+    margin-top: 6px;
+    padding: 8px 10px;
     background: var(--surface);
     font-size: 10px;
-    max-height: 100px;
+    max-height: 400px;
     overflow: auto;
     display: none;
     white-space: pre-wrap;
     word-break: break-all;
+    border-left: 2px solid var(--accent);
+    line-height: 1.5;
 }
 .activity-entry.expanded .activity-detail { display: block; }
+.activity-detail .ad-label { color: var(--text-dim); text-transform: uppercase; font-size: 9px; letter-spacing: 0.6px; font-weight: 600; }
+.activity-detail .ad-section { margin-bottom: 6px; }
 .activity-filter {
     display: flex;
     gap: 8px;
     margin-bottom: 12px;
     align-items: center;
 }
+
+/* ── WORKFLOWS TAB ── */
+.wfops-toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.wfops-run-badge {
+    margin-left: auto;
+    font-size: 9px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+.wfops-run-badge.running {
+    border-color: var(--amber);
+    color: var(--amber);
+}
+.wfops-run-badge.completed {
+    border-color: var(--green);
+    color: var(--green);
+}
+.wfops-run-badge.failed {
+    border-color: var(--red);
+    color: var(--red);
+}
+.wfops-grid {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(380px, 2fr);
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.wfops-exec-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.wfops-panel {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    min-height: 120px;
+}
+.wfops-panel-head {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.wfops-list {
+    max-height: 340px;
+    overflow-y: auto;
+}
+.wfops-item {
+    border-bottom: 1px solid var(--border);
+    padding: 9px 12px;
+    cursor: pointer;
+}
+.wfops-item:hover { background: var(--surface2); }
+.wfops-item.active {
+    border-left: 2px solid var(--accent);
+    background: var(--surface2);
+}
+.wfops-item-title {
+    font-size: 11px;
+    color: var(--text);
+    font-weight: 600;
+}
+.wfops-item-meta {
+    margin-top: 3px;
+    font-size: 9px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.wfops-graph-wrap {
+    height: 360px;
+    overflow: hidden;
+    background: var(--surface2);
+    position: relative;
+}
+.wfops-graph {
+    width: 100%;
+    height: 100%;
+    min-width: 540px;
+}
+.wfops-legend {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+}
+.wfops-legend span {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.wfops-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 4px;
+}
+.wfops-dot.completed { background: #00ff88; }
+.wfops-dot.running { background: #ffaa00; }
+.wfops-dot.failed { background: #ff4444; }
+.wfops-dot.skipped { background: #8b8b8b; }
+.wfops-dot.pending { background: #4d5d78; }
+.wfops-input {
+    width: 100%;
+    min-height: 130px;
+    resize: vertical;
+    border: none;
+    border-top: 1px solid var(--border);
+    background: var(--vscode-editor-background, #0a0a1a);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.5;
+    padding: 10px 12px;
+}
+.wfops-input:focus {
+    outline: none;
+    border-top-color: var(--accent);
+}
+.wfops-exec-status {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+    color: var(--text);
+    min-height: 60px;
+}
+.wfops-node-status {
+    max-height: 220px;
+    overflow-y: auto;
+}
+.wfops-node-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+    cursor: pointer;
+}
+.wfops-node-row:hover { background: var(--surface2); }
+.wfops-node-row.active {
+    border-left: 2px solid var(--accent);
+    background: var(--surface2);
+}
+.wfops-node-row .name {
+    color: var(--text);
+    font-family: var(--mono);
+}
+.wfops-node-row .state {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.wfops-node-row .state.completed { color: #00ff88; }
+.wfops-node-row .state.running { color: #ffaa00; }
+.wfops-node-row .state.failed { color: #ff4444; }
+.wfops-node-row .state.skipped { color: #8b8b8b; }
+.wfops-node-row .state.pending { color: #7a8aa5; }
+.wfops-detail-panel {
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+.wfops-detail {
+    padding: 10px 12px;
+    max-height: 290px;
+    overflow: auto;
+    font-size: 10px;
+    line-height: 1.55;
+}
+.wfops-detail-empty {
+    color: var(--text-dim);
+    font-size: 10px;
+}
+.wfops-drill-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.wfops-drill-name {
+    font-size: 11px;
+    color: var(--text);
+    font-weight: 700;
+    font-family: var(--mono);
+}
+.wfops-drill-pill {
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 1px 6px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.wfops-kv-grid {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 4px 10px;
+    margin-bottom: 8px;
+}
+.wfops-kv-grid .k {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 9px;
+}
+.wfops-kv-grid .v {
+    color: var(--text);
+    word-break: break-word;
+}
+.wfops-subhead {
+    margin: 8px 0 5px;
+    color: var(--text-dim);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+.wfops-chip-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+.wfops-chip {
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 2px 7px;
+    font-size: 9px;
+    font-family: var(--mono);
+    background: var(--surface2);
+}
+.wfops-json {
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    margin-top: 6px;
+}
+.wfops-json pre {
+    margin: 0;
+    padding: 8px 10px;
+    font-size: 9px;
+    color: var(--text);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.wfops-json .wfops-subhead {
+    margin: 0;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+
+/* ── WORKFLOW LIVE TRACING ANIMATIONS ── */
+@keyframes wf-node-running-pulse {
+    0%   { filter: drop-shadow(0 0 0px #ffaa00); opacity: 1; }
+    50%  { filter: drop-shadow(0 0 8px #ffaa00cc); opacity: 0.88; }
+    100% { filter: drop-shadow(0 0 0px #ffaa00); opacity: 1; }
+}
+@keyframes wf-node-completing {
+    0%   { filter: drop-shadow(0 0 6px #ffaa00); }
+    100% { filter: drop-shadow(0 0 4px #00ff88); }
+}
+@keyframes wf-node-failed {
+    0%   { filter: drop-shadow(0 0 0px #ff4444); }
+    25%  { filter: drop-shadow(0 0 10px #ff4444); }
+    75%  { filter: drop-shadow(0 0 3px #ff4444cc); }
+    100% { filter: drop-shadow(0 0 2px #ff444466); }
+}
+@keyframes wf-edge-march {
+    from { stroke-dashoffset: 24; }
+    to   { stroke-dashoffset: 0; }
+}
+@keyframes wf-list-executing {
+    0%   { box-shadow: inset 3px 0 0 var(--wf-color, var(--amber)); }
+    50%  { box-shadow: inset 3px 0 0 var(--wf-color, var(--amber)), 0 0 8px color-mix(in srgb, var(--wf-color, var(--amber)) 30%, transparent); }
+    100% { box-shadow: inset 3px 0 0 var(--wf-color, var(--amber)); }
+}
+g.wf-node-running  { animation: wf-node-running-pulse 1.1s ease-in-out infinite; }
+g.wf-node-completing { animation: wf-node-completing 0.6s ease-out forwards; }
+g.wf-node-failed   { animation: wf-node-failed 0.8s ease-out forwards; }
+path.wf-edge-active {
+    stroke-dasharray: 8 4;
+    animation: wf-edge-march 0.4s linear infinite;
+}
+.wfops-item.executing {
+    animation: wf-list-executing 1.4s ease-in-out infinite;
+}
+.wfops-item.executing .wfops-item-title {
+    color: var(--wf-color, var(--amber));
+}
+/* Draggable node cursor */
+g[data-wf-node-id] { cursor: grab; }
+g[data-wf-node-id]:active { cursor: grabbing; }
 
 /* ── TOOLS TAB ── */
 .tool-category {
@@ -2059,12 +2866,52 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     align-items: center;
 }
 .tool-row:last-child { border-bottom: none; }
-.tool-name { color: var(--accent); font-weight: 600; }
-.tool-desc { color: var(--text-dim); font-size: 10px; }
+.tool-row-wrap { border-bottom: 1px solid var(--border); }
+.tool-row { cursor: pointer; }
+.tool-row:hover { background: var(--surface); }
+.tool-name { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.tool-brief { color: var(--text-dim); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-detail {
+    display: none;
+    padding: 10px 12px 8px;
+    font-size: 11px;
+    color: var(--text);
+    background: var(--surface);
+    border-top: 1px dashed var(--border);
+}
+.tool-detail.visible { display: block; }
+.tool-detail .td-section { margin-bottom: 8px; }
+.tool-detail .td-label {
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-weight: 600;
+    color: var(--text-dim);
+    font-size: 9px;
+    margin-bottom: 4px;
+}
+.tool-detail .td-value { color: var(--text); line-height: 1.5; }
+.tool-detail .td-param {
+    padding: 4px 0 4px 10px;
+    border-left: 2px solid var(--border);
+    margin-bottom: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+}
+.tool-detail .td-param-name { color: var(--accent); font-weight: 600; }
+.tool-detail .td-param-type { color: var(--text-dim); font-style: italic; font-size: 10px; }
+.tool-detail .td-param-desc { color: var(--text); width: 100%; font-size: 10px; opacity: 0.8; }
+.tool-detail .td-param-desc code { background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+.tool-detail .td-param-req { color: var(--amber); font-size: 8px; text-transform: uppercase; font-weight: 700; }
 
 /* ── DIAGNOSTICS TAB ── */
 .diag-section {
     margin-bottom: 20px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 .diag-title {
     font-size: 11px;
@@ -2079,7 +2926,8 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     border: 1px solid var(--border);
     padding: 0;
     font-size: 11px;
-    max-height: 460px;
+    flex: 1;
+    min-height: 200px;
     overflow: auto;
     white-space: normal;
     word-break: normal;
@@ -2361,7 +3209,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 .community-feed {
     flex: 1;
     overflow-y: auto;
-    max-height: 350px;
+    min-height: 120px;
     padding: 0;
 }
 .community-msg {
@@ -2638,6 +3486,32 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 .wf-safety-badge.flagged { color: #fbbf24; border: 1px solid #fbbf24; background: rgba(251,191,36,0.08); }
 .wf-safety-badge.blocked { color: #ef4444; border: 1px solid #ef4444; background: rgba(239,68,68,0.08); }
 .wf-card-flagged { border-left: 2px solid #fbbf24; }
+.wf-source-badge {
+    font-size: 7px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    padding: 1px 5px;
+    border: 1px solid;
+    border-radius: 2px;
+    margin-right: 4px;
+    flex-shrink: 0;
+}
+.nostr-badge { color: #a855f7; border-color: #a855f7; background: rgba(168,85,247,0.08); }
+.gist-badge { color: #e5e7eb; border-color: #6b7280; background: rgba(107,114,128,0.15); }
+.local-badge { color: var(--green); border-color: var(--green); background: rgba(52,211,153,0.08); }
+.wf-card-gist { border-left: 2px solid #6b7280; }
+.mp-section-header {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    padding: 10px 8px 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+}
 .wf-flag-warn {
     font-size: 9px;
     color: #fbbf24;
@@ -2649,12 +3523,12 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 /* ── DETAIL OVERLAY ── */
 .wf-detail-overlay {
     display: none;
-    position: absolute;
+    position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
     background: var(--vscode-editor-background, #0a0a1a);
-    z-index: 50;
+    z-index: 200;
     overflow-y: auto;
-    padding: 16px;
+    padding: 20px;
 }
 .wf-detail-overlay.visible { display: block; }
 .wf-detail-overlay .wf-detail-back {
@@ -2693,8 +3567,8 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     border: 1px solid var(--border);
     padding: 10px;
     font-size: 10px;
-    overflow-x: auto;
-    max-height: 200px;
+    overflow: auto;
+    max-height: 60vh;
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -2921,9 +3795,11 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <button class="tab" data-tab="activity">Activity</button>
     <button class="tab" data-tab="tools">Tools</button>
     <button class="tab" data-tab="diagnostics">Diagnostics</button>
+    <button class="tab" data-tab="workflows">Workflows</button>
     <button class="tab" data-tab="community">Community</button>
 </div>
 
+<div class="content-wrapper">
 <!-- ═══════════════ OVERVIEW TAB ═══════════════ -->
 <div class="content active" id="tab-overview">
     <div class="section-head">OUROBOROS ARCHITECTURE</div>
@@ -2952,7 +3828,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <div class="arch-tier active" id="tier-4">
             <div class="tier-num">4</div>
             <div class="tier-name">Council Consensus</div>
-            <div class="tier-desc">8-slot multi-agent deliberation + HOLD gate</div>
+            <div class="tier-desc">Multi-agent deliberation + HOLD gate</div>
             <div class="tier-status"><span class="dot green pulse"></span></div>
         </div>
         <div class="arch-connector">|</div>
@@ -3021,7 +3897,12 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 
 <!-- ═══════════════ COUNCIL TAB ═══════════════ -->
 <div class="content" id="tab-council">
-    <div class="section-head">8-SLOT COUNCIL GRID</div>
+    <div class="section-head" id="council-grid-title">COUNCIL GRID</div>
+    <div class="council-state-legend">
+        <span class="legend-item"><span class="dot green"></span>Plugged</span>
+        <span class="legend-item"><span class="dot amber pulse"></span>Plugging</span>
+        <span class="legend-item"><span class="dot off"></span>Empty</span>
+    </div>
     <div class="slots-grid" id="slots-grid"></div>
     <div class="council-controls">
         <button onclick="openPlugModal()">PLUG MODEL</button>
@@ -3059,7 +3940,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
             <span id="mem-detail-type" class="mi-type" style="font-size:9px;"></span>
         </div>
         <div id="mem-detail-meta" style="font-size:10px;color:var(--text-dim);margin-bottom:8px;"></div>
-        <div id="mem-detail-content" style="border:1px solid var(--border);border-radius:6px;max-height:500px;overflow:auto;background:var(--surface);font-family:monospace;font-size:11px;line-height:1.5;"></div>
+        <div id="mem-detail-content" style="border:1px solid var(--border);border-radius:6px;flex:1;min-height:120px;overflow:auto;background:var(--surface);font-family:monospace;font-size:11px;line-height:1.5;"></div>
     </div>
 </div>
 
@@ -3120,6 +4001,68 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <div class="diag-section">
         <div class="diag-title">OUTPUT</div>
         <div class="diag-output" id="diag-output">Run a diagnostic command above.</div>
+    </div>
+</div>
+
+<!-- ═══════════════ WORKFLOWS TAB ═══════════════ -->
+<div class="content" id="tab-workflows">
+    <div class="section-head">WORKFLOW AUTOMATION</div>
+    <div class="wfops-toolbar">
+        <button id="wfops-refresh">REFRESH LIST</button>
+        <button class="btn-dim" id="wfops-load">LOAD SELECTED</button>
+        <button id="wfops-execute">EXECUTE</button>
+        <span class="wfops-run-badge" id="wfops-running-badge">IDLE</span>
+    </div>
+
+    <div class="wfops-grid">
+        <div class="wfops-panel">
+            <div class="wfops-panel-head">
+                <span>WORKFLOWS</span>
+                <span id="wfops-count">0</span>
+            </div>
+            <div class="wfops-list" id="wfops-list">
+                <div class="wfops-item" style="color:var(--text-dim);cursor:default;">Open this tab to load workflows...</div>
+            </div>
+        </div>
+
+        <div class="wfops-panel">
+            <div class="wfops-panel-head">
+                <span>FLOW CHART</span>
+                <span id="wfops-selected">none</span>
+            </div>
+            <div class="wfops-graph-wrap">
+                <svg class="wfops-graph" id="wfops-graph" viewBox="0 0 820 360" preserveAspectRatio="xMinYMin meet"></svg>
+            </div>
+            <div class="wfops-legend">
+                <span><i class="wfops-dot completed"></i>completed</span>
+                <span><i class="wfops-dot running"></i>running</span>
+                <span><i class="wfops-dot failed"></i>failed</span>
+                <span><i class="wfops-dot skipped"></i>skipped</span>
+                <span><i class="wfops-dot pending"></i>pending</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="wfops-exec-grid">
+        <div class="wfops-panel">
+            <div class="wfops-panel-head">EXECUTION INPUT (JSON)</div>
+            <textarea class="wfops-input" id="wfops-input" placeholder='{"query":"example"}'></textarea>
+        </div>
+        <div class="wfops-panel">
+            <div class="wfops-panel-head">EXECUTION STATUS</div>
+            <div class="wfops-exec-status" id="wfops-exec-status">Select a workflow and run EXECUTE.</div>
+            <div class="wfops-node-status" id="wfops-node-status"></div>
+        </div>
+    </div>
+
+    <div class="wfops-detail-panel">
+        <div class="wfops-panel-head">
+            <span>DRILL-DOWN INSPECTOR</span>
+            <span id="wfops-detail-kind">workflow</span>
+        </div>
+        <div class="wfops-detail" id="wfops-detail">
+            <div class="wfops-detail-empty">Select a workflow, node, or connection to inspect metadata, resources, and execution context.</div>
+        </div>
     </div>
 </div>
 
@@ -3199,14 +4142,14 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <div class="community-subtab" id="ctab-marketplace" style="display:none;">
         <!-- STATS BAR -->
         <div class="mp-stats" id="mp-stats">
-            <div class="mp-stat"><div class="mp-stat-val" id="mp-wf-count">0</div><div class="mp-stat-label">Documents</div></div>
+            <div class="mp-stat"><div class="mp-stat-val" id="mp-wf-count">0</div><div class="mp-stat-label">Workflows</div></div>
             <div class="mp-stat"><div class="mp-stat-val" id="mp-pub-count">0</div><div class="mp-stat-label">Publishers</div></div>
             <div class="mp-stat"><div class="mp-stat-val" id="mp-cat-count">0</div><div class="mp-stat-label">Categories</div></div>
             <div class="mp-stat"><div class="mp-stat-val" id="mp-node-count">0</div><div class="mp-stat-label">Total Nodes</div></div>
         </div>
         <!-- SEARCH + SORT + ACTIONS -->
         <div class="mp-controls">
-            <input id="mp-search" placeholder="Search documents, tags, authors..." />
+            <input id="mp-search" placeholder="Search workflows, roles, tags, authors..." />
             <select id="mp-sort">
                 <option value="newest">Newest</option>
                 <option value="oldest">Oldest</option>
@@ -3215,11 +4158,16 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
                 <option value="nodes">Most Nodes</option>
                 <option value="safety">Safety Score</option>
             </select>
+            <select id="mp-source-filter">
+                <option value="all">All Sources</option>
+                <option value="nostr">Nostr Only</option>
+                <option value="gist">GitHub Gists</option>
+            </select>
             <button class="btn-dim" id="nostr-fetch-wf">REFRESH</button>
             <button class="btn-dim" id="mp-import-gist-btn">FROM GIST</button>
             <button id="nostr-publish-wf">PUBLISH</button>
         </div>
-        <!-- DOC TYPE PILLS -->
+        <!-- WORKFLOW ROLE PILLS -->
         <div class="mp-categories" id="mp-doctype-pills" style="margin-bottom:2px;">
             <button class="mp-cat-pill active" data-mp-dtype="all">ALL</button>
         </div>
@@ -3229,8 +4177,8 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         </div>
         <!-- DOCUMENT FEED (positioned relative for detail overlay) -->
         <div style="position:relative;">
-            <div class="community-feed" id="nostr-wf-feed" style="max-height:500px;">
-                <div class="mp-empty">Connect to relays to browse documents...</div>
+            <div class="community-feed" id="nostr-wf-feed">
+                <div class="mp-empty">Connect to relays to browse workflows...</div>
             </div>
             <!-- DETAIL OVERLAY (slides over the feed) -->
             <div class="wf-detail-overlay" id="wf-detail-overlay"></div>
@@ -3537,8 +4485,10 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
                     <input id="lud16-input" placeholder="you@getalby.com" style="flex:1;" />
                     <button class="btn-dim" id="lud16-save">SAVE</button>
                     <button class="btn-dim" id="lud16-test">TEST</button>
+                    <button class="btn-dim" id="lud16-check">RUN ZAP CHECK</button>
                 </div>
                 <div id="lud16-status" style="font-size:8px;color:var(--text-dim);margin-top:4px;"></div>
+                <div id="zap-readiness" style="margin-top:8px;border:1px solid var(--border);padding:8px;font-size:9px;line-height:1.6;color:var(--text-dim);font-family:monospace;"></div>
             </div>
             <details style="margin-top:8px;">
                 <summary style="font-size:9px;color:var(--accent);cursor:pointer;">How to get a Lightning address</summary>
@@ -3570,15 +4520,15 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 <!-- ═══════════════ PUBLISH DOCUMENT MODAL ═══════════════ -->
 <div class="modal-overlay" id="publish-wf-modal">
     <div class="modal" style="width:600px;">
-        <div class="modal-title">PUBLISH TO MARKETPLACE</div>
+        <div class="modal-title">PUBLISH WORKFLOW</div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
             <div class="field">
-                <label>Document Type</label>
-                <select id="pub-wf-doctype">
-                    <option value="workflow">Workflow</option>
-                    <option value="skill">Skill</option>
-                    <option value="playbook">Playbook</option>
-                    <option value="recipe">Recipe</option>
+                <label>Workflow Role</label>
+                <select id="pub-wf-role">
+                    <option value="automation" selected>Automation</option>
+                    <option value="operations">Operations (playbook-style)</option>
+                    <option value="integration">Integration (recipe-style)</option>
+                    <option value="knowledge">Knowledge (skill-style)</option>
                 </select>
             </div>
             <div class="field">
@@ -3618,8 +4568,8 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
             <input id="pub-wf-desc" placeholder="What does this workflow do? Be detailed." />
         </div>
         <div class="field">
-            <label id="pub-wf-body-label">Content (Workflow JSON / Skill markdown / Playbook steps)</label>
-            <textarea id="pub-wf-json" placeholder='Paste your document content here...' style="font-size:9px;min-height:80px;resize:vertical;font-family:monospace;" rows="4"></textarea>
+            <label id="pub-wf-body-label">Workflow JSON (DAG definition)</label>
+            <textarea id="pub-wf-json" placeholder='{"id":"my-workflow","name":"My Workflow","nodes":[{"id":"input","type":"input"},{"id":"output","type":"output"}],"connections":[{"from":"input","to":"output"}]}' style="font-size:9px;min-height:80px;resize:vertical;font-family:monospace;" rows="4"></textarea>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
             <div class="field">
@@ -3715,7 +4665,11 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     </div>
 </div>
 
+</div><!-- end content-wrapper -->
+<div class="mp-toast" id="mp-toast"></div>
+
 <script>window.__CATEGORIES__ = ${toolRegistryJSON};</script>
+<script src="${svgPanZoomUri}"></script>
 <script src="${scriptUri}"></script>
 </body>
 </html>`;
