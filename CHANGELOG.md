@@ -2,7 +2,44 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
-## [0.7.0] - 2026-02-16
+## [0.7.1] - 2026-02-17
+
+### Voice Audio Streaming Fix
+- **Fixed**: Peers can now hear your microphone audio. Implemented WebSocket + AudioWorklet bridge that streams ffmpeg PCM audio from the extension host to the webview, where it's converted to a `MediaStream` and handed to PeerJS for WebRTC transmission.
+- **Added**: Real-time PCM-to-MediaStream pipeline via `AudioWorkletProcessor` with linear interpolation resampling (16kHz → AudioContext rate).
+- **Added**: `RTCRtpSender.replaceTrack()` support — mic can be toggled after peers are already connected.
+- **Added**: Content-Security-Policy meta tag for webview (allows `ws://127.0.0.1:*` for audio bridge, `blob:` for AudioWorklet).
+- **Removed**: Dead iframe-based mic capture code (HTTP server, mic iframe, duplicate Privacy tab settings).
+- **Removed**: `naudiodon` native audio dependency (ffmpeg is the sole capture method).
+- **Consolidated**: Voice settings now only in the in-room settings panel (removed duplicate from Privacy tab).
+
+## [0.7.0] - 2026-02-17
+
+### P2P Voice Communications
+- **Added**: NIP-53 Voice Rooms — full voice room lifecycle: create, join, leave, raise hand, live chat (kind 30312, 1311, 10312).
+- **Added**: PeerJS/WebRTC P2P voice transport — real-time audio via peer-to-peer connections. No server hosting required. Signaling via Nostr relay ephemeral events (kind 25050).
+- **Added**: Voice Room UI — onboarding screen, room list with status pills, active room view with participant cards, mic toggle, live chat input, room timer.
+- **Added**: Real-time mic feedback — live level bar (green → yellow → red) using ffmpeg native audio capture with RMS level computation.
+- **Added**: Voice room settings panel — mic sensitivity slider (0.5x–4.0x), noise gate threshold (0–30) in the active room view.
+- **Added**: Speaking detection — per-participant audio level monitoring with visual indicators on participant cards.
+- **Added**: `champion.communityVoice` setting to enable/disable voice features.
+
+### Nostr Protocol Expansion (12 New NIP Methods)
+- **Added**: NIP-39 External Identity Claims — `publishExternalIdentity()` for linking GitHub, Discord, Twitter, etc. to Nostr profile.
+- **Added**: NIP-42 Relay Authentication — `handleRelayAuth()` for AUTH challenge/response with private relays.
+- **Added**: NIP-58 Badges — `createBadge()` and `awardBadge()` for reputation-linked badge definitions and awards.
+- **Added**: NIP-88 Polls — `createPoll()` and `votePoll()` for community governance.
+- **Added**: NIP-90 Data Vending Machines — `submitDvmJob()` and `publishDvmResult()` for AI job marketplace via Nostr.
+- **Added**: NIP-98 HTTP Auth — `signNip98Auth()` for signed HTTP requests.
+- **Added**: NIP-A0 Voice Messages — `sendVoiceNote()` for audio message events.
+- **Added**: WebRTC Signaling — `sendWebRTCSignal()` for P2P voice transport coordination via Nostr.
+
+### Theme & UI
+- **Added**: Theme Import — simple hex color input in Privacy tab for accent color customization. Apply/Reset with live preview swatch.
+- **Added**: Nostr identity bar in Voice tab — shows pubkey + relay count.
+- **Removed**: Discord OAuth2 dependency — no external OAuth, no API gatekeeping. All comms through Nostr relays.
+
+### Persistence & Stability
 - **Added**: FelixBag auto-persistence — bag state auto-loads from `.bag_state.json` on MCP server startup, auto-saves on shutdown (atexit), and background-saves every 5 minutes for marathon sessions.
 - **Added**: Cascade chain & graph persistence — `cascade_chain` and `cascade_graph` operations are now backed by FelixBag. State survives process restarts via automatic fallback-on-lookup and re-persist-on-mutation.
 - **Added**: Local git versioning — Memory tab drill-downs include a "Commit Version" button. Writes bag item to `bag_docs/<type>/` and commits to the workspace git repo. Full git history (log, diff, restore) available via standard git commands.

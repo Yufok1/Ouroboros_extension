@@ -21,6 +21,32 @@ const ZAP_REQUEST_KIND = 9734; // NIP-57 zap request
 const ZAP_RECEIPT_KIND = 9735; // NIP-57 zap receipt
 const STALL_KIND = 30017; // NIP-15 merchant stall
 const PRODUCT_KIND = 30018; // NIP-15 product listing
+// NIP-53: Live Activities & Meeting Spaces
+const LIVE_STREAM_KIND = 30311; // Live streaming event
+const SPACE_HOST_KIND = 30312; // Meeting space / voice room
+const MEETING_ROOM_KIND = 30313; // Scheduled meeting within a space
+const LIVE_CHAT_KIND = 1311; // Live chat message (tied to room via 'a' tag)
+const ROOM_PRESENCE_KIND = 10312; // Room presence (replaceable, one room at a time)
+// NIP-39: External Identities
+const EXTERNAL_IDENTITY_KIND = 10011; // External identity claims (replaceable)
+// NIP-42: Relay Authentication
+const RELAY_AUTH_KIND = 22242; // Client auth response to relay challenge
+// NIP-58: Badges
+const BADGE_DEFINITION_KIND = 30009; // Badge definition (parameterized replaceable)
+const BADGE_AWARD_KIND = 8; // Badge award
+const PROFILE_BADGES_KIND = 30008; // Profile badges list
+// NIP-A0: Voice Messages
+const VOICE_NOTE_KIND = 1222; // Voice note (public)
+const VOICE_MESSAGE_KIND = 1244; // Voice message (DM-style)
+// NIP-88: Polls
+const POLL_KIND = 1018; // Poll definition
+const POLL_RESPONSE_KIND = 1068; // Poll response/vote
+// NIP-90: Data Vending Machines
+const DVM_JOB_REQUEST_BASE = 5000; // Job requests: 5000-5999
+const DVM_JOB_RESULT_BASE = 6000; // Job results: 6000-6999
+const DVM_JOB_FEEDBACK = 7000; // Job feedback
+// WebRTC Signaling (custom ephemeral)
+const WEBRTC_SIGNAL_KIND = 25050; // WebRTC offer/answer/ICE candidates (ephemeral)
 
 // ——————————————————————————————————————————————————————————————————————————————————————————
 // MARKETPLACE DOCUMENT SCHEMA VALIDATION
@@ -370,6 +396,7 @@ export interface NostrFilter {
     '#t'?: string[];
     '#p'?: string[];
     '#e'?: string[];
+    '#a'?: string[];
     since?: number;
     limit?: number;
 }
@@ -389,6 +416,31 @@ export interface PrivacySettings {
     marketplaceEnabled: boolean;
     autoRedact: boolean;
     presenceEnabled: boolean;
+    voiceEnabled: boolean;
+}
+
+// NIP-53 Voice Room types
+export interface VoiceRoom {
+    id: string; // 'd' tag value
+    aTag: string; // full a-tag reference: 30312:<pubkey>:<d>
+    name: string;
+    summary: string;
+    image: string;
+    status: 'open' | 'private' | 'closed';
+    serviceUrl: string; // LiveKit or other media service URL
+    streamingUrl: string; // wss+livekit:// or https://.m3u8
+    hostPubkey: string;
+    participants: Array<{ pubkey: string; role: string }>;
+    tags: string[];
+    createdAt: number;
+    currentParticipants: number;
+}
+
+export interface RoomPresence {
+    pubkey: string;
+    roomATag: string;
+    handRaised: boolean;
+    ts: number;
 }
 
 type NostrEventCallback = (event: NostrEvent) => void;
@@ -409,12 +461,24 @@ export class NostrService {
     public readonly onDM = this._onDM.event;
     private _onPresence = new vscode.EventEmitter<{ pubkey: string; online: boolean; ts: number }>();
     public readonly onPresence = this._onPresence.event;
+    // NIP-53 Voice Rooms
+    private _onVoiceRoom = new vscode.EventEmitter<VoiceRoom>();
+    public readonly onVoiceRoom = this._onVoiceRoom.event;
+    private _onLiveChat = new vscode.EventEmitter<{ roomATag: string; event: NostrEvent }>();
+    public readonly onLiveChat = this._onLiveChat.event;
+    private _onRoomPresence = new vscode.EventEmitter<RoomPresence>();
+    public readonly onRoomPresence = this._onRoomPresence.event;
+    private voiceRooms: Map<string, VoiceRoom> = new Map(); // aTag -> VoiceRoom
+    private static readonly MAX_VOICE_ROOMS = 100;
 
     // Persistent subscription IDs
     private workflowSubId: string | undefined;
     private chatSubId: string | undefined;
     private dmSubId: string | undefined;
     private presenceSubId: string | undefined;
+    private voiceRoomSubId: string | undefined;
+    private liveChatSubId: string | undefined;
+    private roomPresenceSubId: string | undefined;
 
     // User data (bounded for marathon sessions)
     private static readonly MAX_PROFILES = 500;
@@ -432,7 +496,8 @@ export class NostrService {
         dmsEnabled: true,
         marketplaceEnabled: true,
         autoRedact: true,
-        presenceEnabled: true
+        presenceEnabled: true,
+        voiceEnabled: true
     };
 
     constructor(context: vscode.ExtensionContext) {
@@ -746,6 +811,29 @@ export class NostrService {
                         if (event.kind === PRESENCE_KIND) {
                             this.onlineUsers.set(event.pubkey, event.created_at);
                             this._onPresence.fire({ pubkey: event.pubkey, online: true, ts: event.created_at });
+                            return;
+                        }
+                        // NIP-53: Voice room events
+                        if (event.kind === SPACE_HOST_KIND) {
+                            const room = this.parseRoomEvent(event);
+                            if (room) {
+                                this.voiceRooms.set(room.aTag, room);
+                                this.trimMap(this.voiceRooms, NostrService.MAX_VOICE_ROOMS);
+                                this._onVoiceRoom.fire(room);
+                            }
+                            return;
+                        }
+                        if (event.kind === LIVE_CHAT_KIND) {
+                            const aTag = (event.tags.find(t => t[0] === 'a') || [])[1] || '';
+                            if (aTag) { this._onLiveChat.fire({ roomATag: aTag, event }); }
+                            return;
+                        }
+                        if (event.kind === ROOM_PRESENCE_KIND) {
+                            const aTag = (event.tags.find(t => t[0] === 'a') || [])[1] || '';
+                            const handRaised = event.tags.some(t => t[0] === 'hand' && t[1] === 'raised');
+                            if (aTag) {
+                                this._onRoomPresence.fire({ pubkey: event.pubkey, roomATag: aTag, handRaised, ts: event.created_at });
+                            }
                             return;
                         }
                         this._onEvent.fire(event);
@@ -1458,40 +1546,222 @@ export class NostrService {
             ...(since ? { since } : {})
         };
 
-        // Use subscribe so it auto-replays when relays connect
         this.chatSubId = this.subscribe(filter, (_event) => {
             // Event handled by global onEvent emitter
         });
     }
 
-    // ——————————————————————————————————————————————————————————————————————————————————————————
-    // CLEANUP
-    // ——————————————————————————————————————————————————————————————————————————————————————————
+    // ── NIP-53: VOICE ROOMS & LIVE ACTIVITIES ──
+
+    private parseRoomEvent(ev: NostrEvent): VoiceRoom | null {
+        try {
+            const d = (ev.tags.find(t => t[0] === 'd') || [])[1] || '';
+            if (!d) { return null; }
+            const a = `${SPACE_HOST_KIND}:${ev.pubkey}:${d}`;
+            const nm = (ev.tags.find(t => t[0] === 'title') || [])[1] || d;
+            const sm = (ev.tags.find(t => t[0] === 'summary') || [])[1] || '';
+            const im = (ev.tags.find(t => t[0] === 'image') || [])[1] || '';
+            const st = ((ev.tags.find(t => t[0] === 'status') || [])[1] || 'open') as VoiceRoom['status'];
+            const sv = (ev.tags.find(t => t[0] === 'service') || [])[1] || '';
+            const sr = (ev.tags.find(t => t[0] === 'streaming') || [])[1] || '';
+            const ps = ev.tags.filter(t => t[0] === 'p').map(t => ({ pubkey: t[1], role: t[3] || 'participant' }));
+            const tg = ev.tags.filter(t => t[0] === 't').map(t => t[1]);
+            const cp = parseInt((ev.tags.find(t => t[0] === 'current_participants') || [])[1] || '0', 10);
+            return { id: d, aTag: a, name: nm, summary: sm, image: im, status: st, serviceUrl: sv, streamingUrl: sr, hostPubkey: ev.pubkey, participants: ps, tags: tg, createdAt: ev.created_at, currentParticipants: cp };
+        } catch { return null; }
+    }
+
+    async createVoiceRoom(opts: { name: string; summary?: string; status?: VoiceRoom['status']; serviceUrl?: string; streamingUrl?: string; participants?: Array<{ pubkey: string; role: string }>; }): Promise<NostrEvent> {
+        if (!this._privacy.voiceEnabled) { throw new Error('Voice rooms are disabled in privacy settings'); }
+        const rid = 'ouroboros-room-' + Date.now();
+        const ct: string[][] = [['d', rid], ['title', opts.name], ['summary', opts.summary || ''], ['status', opts.status || 'open'], ['t', 'ouroboros'], ['t', 'ouroboros-room'], ['p', this.publicKey, '', 'host']];
+        if (opts.serviceUrl) { ct.push(['service', opts.serviceUrl]); }
+        if (opts.streamingUrl) { ct.push(['streaming', opts.streamingUrl]); }
+        if (opts.participants) { for (const p of opts.participants) { ct.push(['p', p.pubkey, '', p.role]); } }
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: SPACE_HOST_KIND, tags: ct, content: '' });
+        await this.broadcast(ev);
+        return ev;
+    }
+
+    async updateRoomStatus(roomId: string, status: VoiceRoom['status']): Promise<NostrEvent> {
+        const ex = Array.from(this.voiceRooms.values()).find(r => r.id === roomId && r.hostPubkey === this.publicKey);
+        const ut: string[][] = [['d', roomId], ['title', ex?.name || roomId], ['summary', ex?.summary || ''], ['status', status], ['t', 'ouroboros'], ['t', 'ouroboros-room'], ['p', this.publicKey, '', 'host']];
+        if (ex?.serviceUrl) { ut.push(['service', ex.serviceUrl]); }
+        if (ex?.streamingUrl) { ut.push(['streaming', ex.streamingUrl]); }
+        if (ex?.participants) { for (const p of ex.participants.filter(pp => pp.pubkey !== this.publicKey)) { ut.push(['p', p.pubkey, '', p.role]); } }
+        const uev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: SPACE_HOST_KIND, tags: ut, content: '' });
+        await this.broadcast(uev);
+        return uev;
+    }
+
+    async fetchVoiceRooms(since?: number): Promise<void> {
+        if (this.voiceRoomSubId) {
+            this.unsubscribe(this.voiceRoomSubId);
+        }
+
+        const filter: NostrFilter = {
+            kinds: [SPACE_HOST_KIND],
+            '#t': ['ouroboros-room'],
+            limit: 50,
+            ...(since ? { since } : {})
+        };
+
+        this.voiceRoomSubId = this.subscribe(filter, (_event) => {
+            // Event handled by global onEvent emitter
+        });
+    }
+
+    async fetchLiveChat(roomATag: string, since?: number): Promise<void> {
+        if (this.liveChatSubId) {
+            this.unsubscribe(this.liveChatSubId);
+        }
+
+        const filter: NostrFilter = {
+            kinds: [LIVE_CHAT_KIND],
+            '#a': [roomATag],
+            limit: 100,
+            ...(since ? { since } : {})
+        };
+
+        this.liveChatSubId = this.subscribe(filter, (_event) => {
+            // Event handled by global onEvent emitter
+        });
+    }
+
+    async fetchRoomPresence(roomATag: string, since?: number): Promise<void> {
+        if (this.roomPresenceSubId) {
+            this.unsubscribe(this.roomPresenceSubId);
+        }
+
+        const filter: NostrFilter = {
+            kinds: [ROOM_PRESENCE_KIND],
+            '#a': [roomATag],
+            limit: 50,
+            ...(since ? { since } : {})
+        };
+
+        this.roomPresenceSubId = this.subscribe(filter, (_event) => {
+            // Event handled by global onEvent emitter
+        });
+    }
+
+    async sendRoomPresence(roomATag: string, handRaised: boolean = false): Promise<void> {
+        if (!this._privacy.voiceEnabled) { return; }
+        const tags: string[][] = [['a', roomATag], ['t', 'ouroboros']];
+        if (handRaised) { tags.push(['hand', 'raised']); }
+        const event = await this.signEvent({
+            pubkey: this.publicKey,
+            created_at: Math.floor(Date.now() / 1000),
+            kind: ROOM_PRESENCE_KIND,
+            tags,
+            content: JSON.stringify({ status: 'in-room' })
+        });
+        await this.broadcast(event);
+    }
+
+    async leaveRoom(roomATag: string): Promise<void> {
+        const event = await this.signEvent({
+            pubkey: this.publicKey,
+            created_at: Math.floor(Date.now() / 1000),
+            kind: ROOM_PRESENCE_KIND,
+            tags: [['a', roomATag], ['t', 'ouroboros']],
+            content: JSON.stringify({ status: 'left' })
+        });
+        await this.broadcast(event);
+        if (this.liveChatSubId) { this.unsubscribe(this.liveChatSubId); this.liveChatSubId = undefined; }
+        if (this.roomPresenceSubId) { this.unsubscribe(this.roomPresenceSubId); this.roomPresenceSubId = undefined; }
+    }
+
+    async sendLiveChat(roomATag: string, message: string): Promise<NostrEvent> {
+        if (!this._privacy.voiceEnabled) {
+            throw new Error('Voice rooms are disabled in privacy settings');
+        }
+        const { redacted } = this.redact(message);
+        const event = await this.signEvent({
+            pubkey: this.publicKey,
+            created_at: Math.floor(Date.now() / 1000),
+            kind: LIVE_CHAT_KIND,
+            tags: [['a', roomATag], ['t', 'ouroboros']],
+            content: redacted
+        });
+        await this.broadcast(event);
+        return event;
+    }
+
+    getVoiceRooms(): VoiceRoom[] {
+        return Array.from(this.voiceRooms.values()).filter(r => r.status !== 'closed').sort((a, b) => b.createdAt - a.createdAt);
+    }
+
+    getVoiceRoom(aTag: string): VoiceRoom | undefined { return this.voiceRooms.get(aTag); }
+
+    async signNip98Auth(url: string, method: string = 'GET'): Promise<NostrEvent> {
+        if (!this.privateKey) { throw new Error('Nostr not initialized'); }
+        return this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: 27235, tags: [['u', url], ['method', method]], content: '' });
+    }
+
+    async publishExternalIdentity(claims: Array<{ platform: string; identity: string; proof: string }>): Promise<NostrEvent> {
+        const tags: string[][] = claims.map(c => ['i', `${c.platform}:${c.identity}`, c.proof]); tags.push(['t', 'ouroboros']);
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: EXTERNAL_IDENTITY_KIND, tags, content: '' }); await this.broadcast(ev); return ev;
+    }
+
+    async handleRelayAuth(relayUrl: string, challenge: string): Promise<NostrEvent> {
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: RELAY_AUTH_KIND, tags: [['relay', relayUrl], ['challenge', challenge]], content: '' });
+        const ws = this.relays.get(relayUrl); if (ws) { this.sendToRelay(ws, JSON.stringify(['AUTH', ev])); } return ev;
+    }
+
+    async createBadge(opts: { id: string; name: string; description: string; image?: string }): Promise<NostrEvent> {
+        const tags: string[][] = [['d', opts.id], ['name', opts.name], ['description', opts.description], ['t', 'ouroboros']]; if (opts.image) { tags.push(['image', opts.image]); }
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: BADGE_DEFINITION_KIND, tags, content: '' }); await this.broadcast(ev); return ev;
+    }
+
+    async awardBadge(badgeId: string, recipientPubkeys: string[]): Promise<NostrEvent> {
+        const aTag = `${BADGE_DEFINITION_KIND}:${this.publicKey}:${badgeId}`; const tags: string[][] = [['a', aTag]]; recipientPubkeys.forEach(pk => tags.push(['p', pk]));
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: BADGE_AWARD_KIND, tags, content: '' }); await this.broadcast(ev); return ev;
+    }
+
+    async createPoll(question: string, options: string[], expiresIn?: number): Promise<NostrEvent> {
+        const tags: string[][] = options.map((o, i) => ['option', String(i), o]); tags.push(['t', 'ouroboros'], ['t', 'ouroboros-poll']);
+        if (expiresIn) { tags.push(['expiration', String(Math.floor(Date.now() / 1000) + expiresIn)]); }
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: POLL_KIND, tags, content: question }); await this.broadcast(ev); return ev;
+    }
+
+    async votePoll(pollEventId: string, optionIndices: number[]): Promise<NostrEvent> {
+        const tags: string[][] = [['e', pollEventId]]; optionIndices.forEach(i => tags.push(['response', String(i)]));
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: POLL_RESPONSE_KIND, tags, content: '' }); await this.broadcast(ev); return ev;
+    }
+
+    async submitDvmJob(jobKind: number, inputs: Array<{ data: string; type: string; marker?: string }>, params?: Record<string, string>, bidMsats?: number): Promise<NostrEvent> {
+        const kind = DVM_JOB_REQUEST_BASE + jobKind; const tags: string[][] = [];
+        inputs.forEach(inp => { const t = ['i', inp.data, inp.type]; if (inp.marker) { t.push('', inp.marker); } tags.push(t); });
+        if (params) { Object.entries(params).forEach(([k, v]) => tags.push(['param', k, v])); }
+        if (bidMsats) { tags.push(['bid', String(bidMsats)]); }
+        tags.push(['t', 'ouroboros'], ['output', 'text/plain']);
+        const rl = this.getConnectedRelays(); if (rl.length) { tags.push(['relays', ...rl]); }
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind, tags, content: '' }); await this.broadcast(ev); return ev;
+    }
+
+    async publishDvmResult(jobEventId: string, jobKind: number, result: string, customerPubkey: string): Promise<NostrEvent> {
+        const kind = DVM_JOB_RESULT_BASE + jobKind; const tags: string[][] = [['e', jobEventId], ['p', customerPubkey]];
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind, tags, content: result }); await this.broadcast(ev); return ev;
+    }
+
+    async sendWebRTCSignal(targetPubkey: string, roomATag: string, signalType: 'offer' | 'answer' | 'ice' | 'peerjs-offer' | 'peerjs-answer', payload: string): Promise<NostrEvent> {
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: WEBRTC_SIGNAL_KIND, tags: [['p', targetPubkey], ['a', roomATag], ['type', signalType]], content: payload }); await this.broadcast(ev); return ev;
+    }
+
+    async sendVoiceNote(audioUrl: string, durationSecs: number, mimeType: string = 'audio/webm'): Promise<NostrEvent> {
+        const tags: string[][] = [['url', audioUrl], ['m', mimeType], ['duration', String(durationSecs)], ['t', 'ouroboros']];
+        const ev = await this.signEvent({ pubkey: this.publicKey, created_at: Math.floor(Date.now() / 1000), kind: VOICE_NOTE_KIND, tags, content: '' }); await this.broadcast(ev); return ev;
+    }
 
     dispose(): void {
-        for (const [_url, ws] of this.relays) {
-            ws.close();
-        }
-        this.relays.clear();
-        for (const timer of this.reconnectTimers.values()) {
-            clearTimeout(timer);
-        }
-        this.reconnectTimers.clear();
-        this._onEvent.dispose();
-        this._onRelayChange.dispose();
-        this._onDM.dispose();
-        this._onPresence.dispose();
+        for (const [_url, ws] of this.relays) { ws.close(); } this.relays.clear();
+        for (const timer of this.reconnectTimers.values()) { clearTimeout(timer); } this.reconnectTimers.clear();
+        this._onEvent.dispose(); this._onRelayChange.dispose(); this._onDM.dispose(); this._onPresence.dispose();
+        this._onVoiceRoom.dispose(); this._onLiveChat.dispose(); this._onRoomPresence.dispose();
     }
 
-    get connected(): boolean {
-        return this.relays.size > 0;
-    }
-
-    get relayCount(): number {
-        return this.relays.size;
-    }
-
-    getConnectedRelays(): string[] {
-        return Array.from(this.relays.keys());
-    }
+    get connected(): boolean { return this.relays.size > 0; }
+    get relayCount(): number { return this.relays.size; }
+    getConnectedRelays(): string[] { return Array.from(this.relays.keys()); }
 }

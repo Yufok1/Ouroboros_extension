@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { spawn, ChildProcess } from 'child_process';
+import { WebSocketServer, WebSocket as WsWebSocket } from 'ws';
 import { MCPServerManager, TOOL_CATEGORIES } from './mcpServer';
 import { CouncilPanel } from './webview/panel';
 import { GitHubService } from './githubService';
@@ -24,6 +26,192 @@ let modelEvaluator: ModelEvaluator;
 let marketplaceIndex: MarketplaceIndex;
 let ipfsPinning: IPFSPinningService;
 let bagSnapshotPath: string = '';
+// ── FFMPEG NATIVE MIC CAPTURE ──
+let _ffmpegProc: ChildProcess | null = null;
+let _micLevelCallback: ((level: number) => void) | null = null;
+let _micSensitivity = 1.0;
+let _micNoiseGate = 5;
+
+// ── WEBSOCKET AUDIO BRIDGE ──
+// Streams raw PCM from ffmpeg to the webview for WebRTC peer audio
+let _audioWss: InstanceType<typeof WebSocketServer> | null = null;
+let _audioWsPort: number = 0;
+let _audioWsClients: Set<WsWebSocket> = new Set();
+
+/** Start WebSocket server for streaming PCM audio to webview */
+export function startAudioWsServer(): Promise<number> {
+    if (_audioWss && _audioWsPort > 0) { return Promise.resolve(_audioWsPort); }
+    return new Promise((resolve, reject) => {
+        _audioWss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+        _audioWss.on('listening', () => {
+            const addr = _audioWss!.address();
+            if (typeof addr === 'object' && addr) {
+                _audioWsPort = addr.port;
+                console.log(`[AudioWS] Listening on ws://127.0.0.1:${_audioWsPort}`);
+                resolve(_audioWsPort);
+            } else {
+                reject(new Error('Failed to get AudioWS port'));
+            }
+        });
+        _audioWss.on('connection', (ws) => {
+            _audioWsClients.add(ws);
+            ws.on('close', () => _audioWsClients.delete(ws));
+            ws.on('error', () => _audioWsClients.delete(ws));
+        });
+        _audioWss.on('error', reject);
+    });
+}
+
+/** Stop WebSocket audio server */
+export function stopAudioWsServer(): void {
+    _audioWsClients.forEach(c => { try { c.close(); } catch {} });
+    _audioWsClients.clear();
+    if (_audioWss) { try { _audioWss.close(); } catch {} _audioWss = null; }
+    _audioWsPort = 0;
+}
+
+/** Broadcast raw PCM binary to all connected webview clients */
+function broadcastAudioChunk(chunk: Buffer): void {
+    for (const client of _audioWsClients) {
+        if (client.readyState === WsWebSocket.OPEN) {
+            client.send(chunk);
+        }
+    }
+}
+
+/** Get the WebSocket audio server port (0 if not started) */
+export function getAudioWsPort(): number { return _audioWsPort; }
+
+/** List available audio input devices via ffmpeg */
+export async function listAudioDevices(): Promise<string[]> {
+    return new Promise((resolve) => {
+        const proc = spawn('ffmpeg', ['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'], { stdio: ['pipe', 'pipe', 'pipe'] });
+        let stderr = '';
+        proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+        proc.on('close', () => {
+            const devices: string[] = [];
+            const lines = stderr.split('\n');
+            let inAudio = false;
+            for (const line of lines) {
+                if (line.includes('DirectShow audio devices')) { inAudio = true; continue; }
+                if (line.includes('DirectShow video devices')) { inAudio = false; continue; }
+                if (inAudio) {
+                    const match = line.match(/"([^"]+)"/);
+                    if (match && !line.includes('Alternative name')) { devices.push(match[1]); }
+                }
+            }
+            resolve(devices);
+        });
+        proc.on('error', () => resolve([]));
+        setTimeout(() => { try { proc.kill(); } catch {} }, 5000);
+    });
+}
+
+/** Start capturing audio from the default mic via ffmpeg. Calls onLevel with 0-100 level values. */
+export async function startMicCapture(onLevel: (level: number) => void, deviceName?: string): Promise<{ success: boolean; error?: string; device?: string }> {
+    if (_ffmpegProc) { return { success: true, device: deviceName || 'already running' }; }
+
+    // Find a device if none specified
+    if (!deviceName) {
+        const devices = await listAudioDevices();
+        if (devices.length === 0) {
+            return { success: false, error: 'No audio input devices found. Is a microphone connected?' };
+        }
+        deviceName = devices[0];
+    }
+
+    _micLevelCallback = onLevel;
+
+    return new Promise((resolve) => {
+        try {
+            // Capture raw 16-bit PCM at 16kHz mono from the mic
+            _ffmpegProc = spawn('ffmpeg', [
+                '-f', 'dshow',
+                '-i', `audio=${deviceName}`,
+                '-f', 's16le',
+                '-ar', '16000',
+                '-ac', '1',
+                '-loglevel', 'error',
+                'pipe:1'
+            ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+            let started = false;
+
+            _ffmpegProc.stdout?.on('data', (chunk: Buffer) => {
+                if (!started) {
+                    started = true;
+                    console.log(`[Mic] ffmpeg capturing from: ${deviceName}`);
+                    resolve({ success: true, device: deviceName });
+                }
+                // Compute RMS level from 16-bit PCM samples
+                const samples = new Int16Array(chunk.buffer, chunk.byteOffset, Math.floor(chunk.length / 2));
+                let sumSq = 0;
+                for (let i = 0; i < samples.length; i++) {
+                    const normalized = samples[i] / 32768;
+                    sumSq += normalized * normalized;
+                }
+                const rms = Math.sqrt(sumSq / samples.length);
+                let level = Math.min(100, rms * 300 * _micSensitivity); // Scale to 0-100
+                if (level < _micNoiseGate) level = 0;
+                if (_micLevelCallback) _micLevelCallback(level);
+                // Stream raw PCM to webview via WebSocket for peer audio
+                broadcastAudioChunk(chunk);
+            });
+
+            _ffmpegProc.stderr?.on('data', (d: Buffer) => {
+                const msg = d.toString().trim();
+                if (msg && !started) {
+                    console.error('[Mic] ffmpeg error:', msg);
+                }
+            });
+
+            _ffmpegProc.on('error', (err) => {
+                console.error('[Mic] ffmpeg spawn error:', err.message);
+                if (!started) {
+                    resolve({ success: false, error: `ffmpeg not found or failed: ${err.message}. Install ffmpeg and ensure it's on PATH.` });
+                }
+                _ffmpegProc = null;
+            });
+
+            _ffmpegProc.on('close', (code) => {
+                console.log(`[Mic] ffmpeg exited with code ${code}`);
+                if (!started) {
+                    resolve({ success: false, error: `ffmpeg exited with code ${code}` });
+                }
+                _ffmpegProc = null;
+                if (_micLevelCallback) _micLevelCallback(0);
+            });
+
+            // Timeout if ffmpeg doesn't start producing data
+            setTimeout(() => {
+                if (!started) {
+                    resolve({ success: false, error: 'ffmpeg timed out — no audio data received. Check your microphone.' });
+                    stopMicCapture();
+                }
+            }, 5000);
+        } catch (err: any) {
+            resolve({ success: false, error: err.message });
+        }
+    });
+}
+
+/** Stop mic capture */
+export function stopMicCapture(): void {
+    if (_ffmpegProc) {
+        try { _ffmpegProc.kill('SIGTERM'); } catch {}
+        _ffmpegProc = null;
+    }
+    _micLevelCallback = null;
+}
+
+/** Update mic sensitivity */
+export function setMicSensitivity(val: number): void { _micSensitivity = val; }
+
+/** Update mic noise gate */
+export function setMicNoiseGate(val: number): void { _micNoiseGate = val; }
+
+/** Check if mic is currently capturing */
+export function isMicCapturing(): boolean { return _ffmpegProc !== null; }
 
 export function activate(context: vscode.ExtensionContext) {
     mcpManager = new MCPServerManager(context);
@@ -33,6 +221,9 @@ export function activate(context: vscode.ExtensionContext) {
     // ── New services (v0.5.0) ─────────────────────────────────
     modelEvaluator = new ModelEvaluator(context);
     ipfsPinning = new IPFSPinningService(context);
+
+    // Audio WebSocket server cleanup on deactivate
+    context.subscriptions.push({ dispose: () => stopAudioWsServer() });
 
     // MarketplaceIndex needs MCP for embeddings — initialized with
     // a reputation lookup that bridges to nostrService when available
@@ -91,7 +282,6 @@ export function activate(context: vscode.ExtensionContext) {
 
     // GitHub — always available, auth is lazy
     githubService = new GitHubService();
-    // Try silent auth (picks up existing session without prompting)
     githubService.authenticate(true).catch(() => {});
 
     // Auto-start MCP server
@@ -403,6 +593,9 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export async function deactivate() {
+    // Stop audio bridge
+    stopMicCapture();
+    stopAudioWsServer();
     // Auto-save FelixBag before shutdown
     if (mcpManager && mcpManager.status === 'running' && bagSnapshotPath) {
         try {

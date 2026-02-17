@@ -2,7 +2,7 @@
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
   "description": "Local AI model orchestrator with 140+ MCP tools. Manage HuggingFace models, semantic memory, workflows, and developer collaboration.",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "galleryBanner": {
     "color": "#1a1a2e",
     "theme": "dark"
@@ -308,6 +308,12 @@
           "description": "Share online presence with other community members",
           "order": 46
         },
+        "champion.communityVoice": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable NIP-53 voice rooms (live activities, meeting spaces, live chat)",
+          "order": 47
+        },
         "champion.evaluation.enabled": {
           "type": "boolean",
           "default": true,
@@ -322,7 +328,11 @@
         },
         "champion.ipfs.provider": {
           "type": "string",
-          "enum": ["none", "pinata", "web3storage"],
+          "enum": [
+            "none",
+            "pinata",
+            "web3storage"
+          ],
           "default": "none",
           "description": "IPFS pinning provider for persisting CIDs (requires API key)",
           "order": 55

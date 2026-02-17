@@ -27,6 +27,285 @@
     let _wfColorCache = {};     // workflowId -> '#rrggbb'
     let _wfColorIndex = 0;
 
+    // ── NIP-53: VOICE ROOM STATE ──
+    let _voiceRooms = [];
+    let _activeRoomATag = null;
+    let _activeRoomParticipants = {};
+    let _voiceChatMessages = [];
+    let _voiceMicOn = false;
+    let _voiceRoomTimer = null;
+    let _voiceRoomJoinTime = 0;
+    let _voiceMicSensitivity = 1.5; // multiplier for level display
+    let _voiceNoiseGate = 5; // minimum level threshold (0-100)
+    let _voicePTTMode = false; // false = open mic, true = push-to-talk
+    let _voicePTTKey = ' '; // default PTT key (Space)
+    let _voicePTTActive = false; // true while PTT key is held
+    let _voicePTTBinding = false; // true while waiting for new PTT key press
+    let _voiceDeafened = false; // true = incoming audio muted
+    let _voiceMasterVolume = 100; // 0-100
+    let _voiceSelectedDevice = ''; // selected input device name
+
+    // ── WEBSOCKET + AUDIOWORKLET BRIDGE ──
+    // Receives raw PCM from extension via WebSocket, produces MediaStream for PeerJS
+    let _audioWs = null;
+    let _audioWorkletNode = null;
+    let _audioStreamDest = null;
+    let _audioWsCtx = null;
+
+    async function _startAudioBridge(wsPort) {
+        if (_audioWs) return; // already connected
+        try {
+            _audioWsCtx = new (window.AudioContext || window.webkitAudioContext)();
+            // Register AudioWorklet processor via Blob URL (avoids CSP file-serving issues)
+            var workletCode = [
+                'class PCMWorkletProcessor extends AudioWorkletProcessor {',
+                '  constructor() {',
+                '    super();',
+                '    this._buf = new Float32Array(0);',
+                '    this._ratio = sampleRate / 16000;',
+                '    this.port.onmessage = (e) => {',
+                '      if (e.data instanceof ArrayBuffer) {',
+                '        var pcm = new Int16Array(e.data);',
+                '        var f = new Float32Array(pcm.length);',
+                '        for (var i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;',
+                '        var out;',
+                '        if (Math.abs(this._ratio - 1) > 0.01) {',
+                '          var len = Math.round(f.length * this._ratio);',
+                '          out = new Float32Array(len);',
+                '          for (var j = 0; j < len; j++) {',
+                '            var si = j / this._ratio;',
+                '            var i0 = Math.floor(si);',
+                '            var i1 = Math.min(i0 + 1, f.length - 1);',
+                '            var fr = si - i0;',
+                '            out[j] = f[i0] * (1 - fr) + f[i1] * fr;',
+                '          }',
+                '        } else { out = f; }',
+                '        var nb = new Float32Array(this._buf.length + out.length);',
+                '        nb.set(this._buf);',
+                '        nb.set(out, this._buf.length);',
+                '        this._buf = nb;',
+                '      } else if (e.data === "clear") {',
+                '        this._buf = new Float32Array(0);',
+                '      }',
+                '    };',
+                '  }',
+                '  process(inputs, outputs) {',
+                '    var ch = outputs[0][0];',
+                '    if (!ch) return true;',
+                '    if (this._buf.length >= ch.length) {',
+                '      ch.set(this._buf.subarray(0, ch.length));',
+                '      this._buf = this._buf.subarray(ch.length);',
+                '    } else {',
+                '      if (this._buf.length > 0) ch.set(this._buf);',
+                '      for (var i = this._buf.length; i < ch.length; i++) ch[i] = 0;',
+                '      this._buf = new Float32Array(0);',
+                '    }',
+                '    return true;',
+                '  }',
+                '}',
+                'registerProcessor("pcm-worklet-processor", PCMWorkletProcessor);'
+            ].join('\n');
+            var blob = new Blob([workletCode], { type: 'application/javascript' });
+            var workletUrl = URL.createObjectURL(blob);
+            await _audioWsCtx.audioWorklet.addModule(workletUrl);
+            URL.revokeObjectURL(workletUrl);
+
+            _audioWorkletNode = new AudioWorkletNode(_audioWsCtx, 'pcm-worklet-processor');
+            _audioStreamDest = _audioWsCtx.createMediaStreamDestination();
+            _audioWorkletNode.connect(_audioStreamDest);
+
+            _audioWs = new WebSocket('ws://127.0.0.1:' + wsPort);
+            _audioWs.binaryType = 'arraybuffer';
+            _audioWs.onmessage = function (evt) {
+                if (evt.data instanceof ArrayBuffer && _audioWorkletNode) {
+                    _audioWorkletNode.port.postMessage(evt.data, [evt.data]);
+                }
+            };
+            _audioWs.onopen = function () {
+                console.log('[AudioBridge] WebSocket connected to port ' + wsPort);
+            };
+            _audioWs.onerror = function (err) {
+                console.error('[AudioBridge] WebSocket error:', err);
+            };
+            _audioWs.onclose = function () {
+                console.log('[AudioBridge] WebSocket closed');
+                _audioWs = null;
+            };
+
+            VoiceP2P.setLocalStream(_audioStreamDest.stream);
+            console.log('[AudioBridge] MediaStream set on VoiceP2P');
+        } catch (err) {
+            console.error('[AudioBridge] Failed to start:', err);
+        }
+    }
+
+    function _stopAudioBridge() {
+        if (_audioWs) { try { _audioWs.close(); } catch (e) {} _audioWs = null; }
+        if (_audioWorkletNode) { try { _audioWorkletNode.disconnect(); } catch (e) {} _audioWorkletNode = null; }
+        _audioStreamDest = null;
+        if (_audioWsCtx) { try { _audioWsCtx.close(); } catch (e) {} _audioWsCtx = null; }
+        VoiceP2P.clearLocalStream();
+    }
+
+    // ── P2P VOICE MANAGER (PeerJS) ──
+    var VoiceP2P = (function () {
+        var _peer = null;
+        var _localStream = null;
+        var _peers = {}; // peerId -> { call, stream, audioEl, analyser, speaking }
+        var _roomId = null;
+        var _myPeerId = null;
+        var _speakingRAF = null;
+        var _audioCtx = null;
+
+        function generatePeerId(roomId) {
+            // Deterministic-ish peer ID from room + random suffix
+            var rand = Math.random().toString(36).substring(2, 8);
+            return 'ouro-' + roomId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16) + '-' + rand;
+        }
+
+        function attachRemoteStream(peerId, stream) {
+            var audio = document.createElement('audio');
+            audio.srcObject = stream;
+            audio.autoplay = true;
+            audio.setAttribute('data-peer', peerId);
+            document.body.appendChild(audio);
+            // Speaking detection for this peer
+            var peerInfo = _peers[peerId];
+            if (peerInfo) {
+                peerInfo.audioEl = audio;
+                peerInfo.stream = stream;
+                try {
+                    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    var source = _audioCtx.createMediaStreamSource(stream);
+                    var analyser = _audioCtx.createAnalyser();
+                    analyser.fftSize = 256;
+                    analyser.smoothingTimeConstant = 0.5;
+                    source.connect(analyser);
+                    peerInfo.analyser = analyser;
+                } catch (e) { console.warn('[VoiceP2P] analyser error:', e); }
+            }
+        }
+
+        function detachPeer(peerId) {
+            var info = _peers[peerId];
+            if (!info) return;
+            if (info.call) try { info.call.close(); } catch (e) {}
+            if (info.audioEl) { info.audioEl.pause(); info.audioEl.srcObject = null; info.audioEl.remove(); }
+            delete _peers[peerId];
+            renderVoiceParticipants();
+        }
+
+        function updateSpeakingIndicators() {
+            if (!_roomId) return;
+            var buf = new Uint8Array(128);
+            Object.keys(_peers).forEach(function (pid) {
+                var p = _peers[pid];
+                if (p && p.analyser) {
+                    p.analyser.getByteFrequencyData(buf);
+                    var sum = 0;
+                    for (var i = 0; i < buf.length; i++) sum += buf[i];
+                    var avg = sum / buf.length;
+                    var wasSpeaking = p.speaking;
+                    p.speaking = avg > 15;
+                    if (p.speaking !== wasSpeaking) renderVoiceParticipants();
+                }
+            });
+            _speakingRAF = requestAnimationFrame(updateSpeakingIndicators);
+        }
+
+        return {
+            join: function (roomId) {
+                if (typeof Peer === 'undefined') {
+                    console.error('[VoiceP2P] PeerJS not loaded');
+                    return;
+                }
+                _roomId = roomId;
+                _myPeerId = generatePeerId(roomId);
+                _peer = new Peer(_myPeerId, {
+                    debug: 1,
+                    config: {
+                        iceServers: [
+                            { urls: 'stun:stun.l.google.com:19302' },
+                            { urls: 'stun:stun1.l.google.com:19302' },
+                            { urls: 'stun:stun.services.mozilla.com' }
+                        ]
+                    }
+                });
+                _peer.on('open', function (id) {
+                    console.log('[VoiceP2P] Connected as', id);
+                    // Tell extension our peer ID so it can broadcast via Nostr
+                    vscode.postMessage({ command: 'voiceP2PReady', peerId: id, roomId: roomId });
+                });
+                _peer.on('call', function (call) {
+                    console.log('[VoiceP2P] Incoming call from', call.peer);
+                    _peers[call.peer] = { call: call, stream: null, audioEl: null, analyser: null, speaking: false };
+                    call.answer(_localStream || undefined);
+                    call.on('stream', function (remoteStream) {
+                        attachRemoteStream(call.peer, remoteStream);
+                        renderVoiceParticipants();
+                    });
+                    call.on('close', function () { detachPeer(call.peer); });
+                    call.on('error', function (err) { console.error('[VoiceP2P] call error:', err); detachPeer(call.peer); });
+                });
+                _peer.on('error', function (err) { console.error('[VoiceP2P] peer error:', err); });
+                // Start speaking detection loop
+                _speakingRAF = requestAnimationFrame(updateSpeakingIndicators);
+            },
+            connectToPeer: function (remotePeerId) {
+                if (!_peer || !_peer.open || _peers[remotePeerId]) return;
+                console.log('[VoiceP2P] Calling peer', remotePeerId);
+                _peers[remotePeerId] = { call: null, stream: null, audioEl: null, analyser: null, speaking: false };
+                var call = _peer.call(remotePeerId, _localStream || new MediaStream());
+                _peers[remotePeerId].call = call;
+                call.on('stream', function (remoteStream) {
+                    attachRemoteStream(remotePeerId, remoteStream);
+                    renderVoiceParticipants();
+                });
+                call.on('close', function () { detachPeer(remotePeerId); });
+                call.on('error', function (err) { console.error('[VoiceP2P] call error:', err); detachPeer(remotePeerId); });
+            },
+            setLocalStream: function (stream) {
+                _localStream = stream;
+                // Replace audio track on existing peer connections
+                if (stream) {
+                    var track = stream.getAudioTracks()[0];
+                    if (track) {
+                        Object.keys(_peers).forEach(function (pid) {
+                            var info = _peers[pid];
+                            if (info.call && info.call.peerConnection) {
+                                var senders = info.call.peerConnection.getSenders();
+                                senders.forEach(function (sender) {
+                                    if (sender.track && sender.track.kind === 'audio') {
+                                        sender.replaceTrack(track).catch(function (err) {
+                                            console.warn('[VoiceP2P] replaceTrack failed for', pid, err);
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
+            },
+            clearLocalStream: function () {
+                _localStream = null;
+            },
+            leave: function () {
+                _roomId = null;
+                if (_speakingRAF) { cancelAnimationFrame(_speakingRAF); _speakingRAF = null; }
+                Object.keys(_peers).forEach(function (pid) { detachPeer(pid); });
+                _peers = {};
+                if (_peer) { try { _peer.destroy(); } catch (e) {} _peer = null; }
+                if (_audioCtx) { try { _audioCtx.close(); } catch (e) {} _audioCtx = null; }
+                _localStream = null;
+                _myPeerId = null;
+            },
+            getPeerCount: function () { return Object.keys(_peers).length; },
+            getPeers: function () { return _peers; },
+            getMyPeerId: function () { return _myPeerId; },
+            isConnected: function () { return _peer && _peer.open; }
+        };
+    })();
+
     // ── MESSAGE HANDLER ──
     window.addEventListener('message', function (e) {
         var msg = e.data;
@@ -127,6 +406,95 @@
                     break;
                 case 'nostrOnlineUsers':
                     handleOnlineUsers(msg.users || []);
+                    break;
+                // ── NIP-53: VOICE ROOMS ──
+                case 'nostrVoiceRoom':
+                    handleVoiceRoomUpdate(msg.room);
+                    break;
+                case 'nostrVoiceRooms':
+                    handleVoiceRoomList(msg.rooms || []);
+                    break;
+                case 'nostrLiveChat':
+                    handleVoiceLiveChat(msg);
+                    break;
+                case 'nostrRoomPresence':
+                    handleVoiceRoomPresence(msg.presence);
+                    break;
+                case 'nostrRoomJoined':
+                    handleVoiceRoomJoined(msg);
+                    break;
+                case 'nostrRoomLeft':
+                    handleVoiceRoomLeft(msg);
+                    break;
+                case 'nostrVoiceRoomCreated':
+                    vscode.postMessage({ command: 'nostrFetchVoiceRooms' });
+                    break;
+                case 'voiceP2PPeerJoined':
+                    if (msg.peerId && VoiceP2P.isConnected()) {
+                        VoiceP2P.connectToPeer(msg.peerId);
+                    }
+                    break;
+                case 'micStarted':
+                    _voiceMicOn = true;
+                    var micToggleEl = document.getElementById('voice-mic-toggle');
+                    if (micToggleEl) micToggleEl.classList.add('active');
+                    var micLabelEl = document.getElementById('voice-mic-label');
+                    if (micLabelEl) micLabelEl.textContent = 'MIC ON' + (msg.device ? ' (' + msg.device.substring(0, 20) + ')' : '');
+                    renderVoiceParticipants();
+                    // Start audio bridge for peer streaming
+                    if (msg.audioWsPort) { _startAudioBridge(msg.audioWsPort); }
+                    break;
+                case 'micStopped':
+                    _voiceMicOn = false;
+                    var micToggleEl2 = document.getElementById('voice-mic-toggle');
+                    if (micToggleEl2) micToggleEl2.classList.remove('active');
+                    var micLabelEl2 = document.getElementById('voice-mic-label');
+                    if (micLabelEl2) micLabelEl2.textContent = 'MIC OFF';
+                    var barEl = document.getElementById('voice-mic-level-bar');
+                    if (barEl) { barEl.style.width = '0%'; barEl.style.background = '#4caf50'; }
+                    _stopAudioBridge();
+                    renderVoiceParticipants();
+                    break;
+                case 'micLevel':
+                    var level = msg.level || 0;
+                    var barEl2 = document.getElementById('voice-mic-level-bar');
+                    if (barEl2) {
+                        barEl2.style.width = level + '%';
+                        if (level < 40) barEl2.style.background = '#4caf50';
+                        else if (level < 70) barEl2.style.background = '#ff9800';
+                        else barEl2.style.background = '#f44336';
+                    }
+                    var testBar = document.getElementById('voice-test-bar');
+                    if (testBar) {
+                        testBar.style.width = level + '%';
+                        if (level < 40) testBar.style.background = '#4caf50';
+                        else if (level < 70) testBar.style.background = '#ff9800';
+                        else testBar.style.background = '#f44336';
+                    }
+                    break;
+                case 'micError':
+                    console.error('[Mic] Error:', msg.error);
+                    var micLabelErr = document.getElementById('voice-mic-label');
+                    if (micLabelErr) micLabelErr.textContent = msg.error || 'MIC ERROR';
+                    break;
+                case 'audioDevices':
+                    console.log('[Mic] Available devices:', msg.devices);
+                    // Populate input device dropdown
+                    var devSelect = document.getElementById('voice-input-device');
+                    if (devSelect && msg.devices) {
+                        var currentVal = devSelect.value;
+                        devSelect.innerHTML = '<option value="">Default Microphone</option>';
+                        (msg.devices || []).forEach(function (dev) {
+                            var opt = document.createElement('option');
+                            opt.value = dev;
+                            opt.textContent = dev;
+                            if (dev === _voiceSelectedDevice) opt.selected = true;
+                            devSelect.appendChild(opt);
+                        });
+                        if (!_voiceSelectedDevice && msg.devices.length > 0) {
+                            // Keep default selected
+                        }
+                    }
                     break;
                 case 'nostrZapReceipt':
                     handleZapReceipt(msg);
@@ -2742,8 +3110,268 @@
                 _gistIndexingTriggered = true;
                 vscode.postMessage({ command: 'triggerGistIndexing' });
             }
+            // Fetch voice rooms when switching to voice tab
+            if (btn.dataset.ctab === 'voice') {
+                vscode.postMessage({ command: 'nostrGetVoiceRooms' });
+            }
         });
     });
+
+    // ── NIP-53: VOICE ROOM BUTTON HANDLERS ──
+    (function () {
+        var refreshBtn = document.getElementById('voice-refresh-btn');
+        var createBtn = document.getElementById('voice-create-btn');
+        var createSubmit = document.getElementById('voice-create-submit');
+        var createCancel = document.getElementById('voice-create-cancel');
+        var leaveBtn = document.getElementById('voice-leave-btn');
+        var raiseHandBtn = document.getElementById('voice-raise-hand');
+        var chatSendBtn = document.getElementById('voice-chat-send');
+        var chatInput = document.getElementById('voice-chat-input');
+
+        var heroCreateBtn = document.getElementById('voice-create-btn-hero');
+        var micToggle = document.getElementById('voice-mic-toggle');
+        var settingsBtn = document.getElementById('voice-settings-btn');
+        var settingsPanel = document.getElementById('voice-settings-panel');
+        var settingsClose = document.getElementById('voice-settings-close');
+        var voiceSensSlider = document.getElementById('voice-sensitivity');
+        var voiceSensVal = document.getElementById('voice-sensitivity-val');
+        var voiceGateSlider = document.getElementById('voice-noisegate');
+        var voiceGateVal = document.getElementById('voice-noisegate-val');
+
+        // Settings gear toggle
+        if (settingsBtn) settingsBtn.addEventListener('click', function () {
+            if (settingsPanel) settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
+        });
+        if (settingsClose) settingsClose.addEventListener('click', function () {
+            if (settingsPanel) settingsPanel.style.display = 'none';
+        });
+        // Sensitivity slider
+        if (voiceSensSlider) voiceSensSlider.addEventListener('input', function () {
+            var val = parseFloat(voiceSensSlider.value);
+            _voiceMicSensitivity = val;
+            if (voiceSensVal) voiceSensVal.textContent = val.toFixed(1) + 'x';
+            vscode.postMessage({ command: 'setMicSensitivity', value: val });
+        });
+        // Noise gate slider
+        if (voiceGateSlider) voiceGateSlider.addEventListener('input', function () {
+            var val = parseInt(voiceGateSlider.value, 10);
+            _voiceNoiseGate = val;
+            if (voiceGateVal) voiceGateVal.textContent = String(val);
+            vscode.postMessage({ command: 'setMicNoiseGate', value: val });
+        });
+
+        // ── INPUT DEVICE SELECTOR ──
+        var deviceSelect = document.getElementById('voice-input-device');
+        // Populate devices when settings panel opens
+        if (settingsBtn) {
+            var origClick = settingsBtn.onclick;
+            settingsBtn.addEventListener('click', function () {
+                if (settingsPanel && settingsPanel.style.display !== 'none') {
+                    // Panel just opened — fetch devices
+                    vscode.postMessage({ command: 'listAudioDevices' });
+                }
+            });
+        }
+        if (deviceSelect) deviceSelect.addEventListener('change', function () {
+            _voiceSelectedDevice = deviceSelect.value;
+            // If mic is on, restart with new device
+            if (_voiceMicOn) {
+                vscode.postMessage({ command: 'stopMicCapture' });
+                setTimeout(function () {
+                    vscode.postMessage({ command: 'startMicCapture', device: _voiceSelectedDevice || undefined });
+                }, 200);
+            }
+        });
+
+        // ── MIC MODE: OPEN MIC / PUSH-TO-TALK ──
+        var modeOpenBtn = document.getElementById('voice-mode-open');
+        var modePttBtn = document.getElementById('voice-mode-ptt');
+        var pttKeyRow = document.getElementById('voice-ptt-key-row');
+        var pttKeyBtn = document.getElementById('voice-ptt-key-btn');
+
+        function updateModeUI() {
+            if (modeOpenBtn) {
+                modeOpenBtn.style.background = _voicePTTMode ? '' : 'var(--accent)';
+                modeOpenBtn.style.color = _voicePTTMode ? '' : '#000';
+                modeOpenBtn.style.fontWeight = _voicePTTMode ? '' : 'bold';
+            }
+            if (modePttBtn) {
+                modePttBtn.style.background = _voicePTTMode ? 'var(--accent)' : '';
+                modePttBtn.style.color = _voicePTTMode ? '#000' : '';
+                modePttBtn.style.fontWeight = _voicePTTMode ? 'bold' : '';
+            }
+            if (pttKeyRow) pttKeyRow.style.display = _voicePTTMode ? 'flex' : 'none';
+        }
+        if (modeOpenBtn) modeOpenBtn.addEventListener('click', function () {
+            _voicePTTMode = false;
+            updateModeUI();
+            // If PTT was active and key is released, mic stays on in open mic mode
+        });
+        if (modePttBtn) modePttBtn.addEventListener('click', function () {
+            _voicePTTMode = true;
+            updateModeUI();
+            // In PTT mode, mic should be off until key is held
+            if (_voiceMicOn && !_voicePTTActive) {
+                vscode.postMessage({ command: 'stopMicCapture' });
+            }
+        });
+
+        // PTT key binding
+        if (pttKeyBtn) pttKeyBtn.addEventListener('click', function () {
+            _voicePTTBinding = true;
+            pttKeyBtn.textContent = '...press a key...';
+            pttKeyBtn.style.color = 'var(--accent)';
+        });
+
+        // PTT keydown/keyup handlers (global)
+        document.addEventListener('keydown', function (e) {
+            if (_voicePTTBinding) {
+                e.preventDefault();
+                _voicePTTKey = e.key;
+                _voicePTTBinding = false;
+                if (pttKeyBtn) {
+                    pttKeyBtn.textContent = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+                    pttKeyBtn.style.color = '';
+                }
+                return;
+            }
+            if (_voicePTTMode && _activeRoomATag && e.key === _voicePTTKey && !_voicePTTActive) {
+                _voicePTTActive = true;
+                if (!_voiceMicOn) {
+                    vscode.postMessage({ command: 'startMicCapture', device: _voiceSelectedDevice || undefined });
+                }
+            }
+        });
+        document.addEventListener('keyup', function (e) {
+            if (_voicePTTMode && e.key === _voicePTTKey && _voicePTTActive) {
+                _voicePTTActive = false;
+                if (_voiceMicOn) {
+                    vscode.postMessage({ command: 'stopMicCapture' });
+                }
+            }
+        });
+
+        // ── DEAFEN BUTTON ──
+        var deafenBtn = document.getElementById('voice-deafen-btn');
+        if (deafenBtn) deafenBtn.addEventListener('click', function () {
+            _voiceDeafened = !_voiceDeafened;
+            deafenBtn.style.background = _voiceDeafened ? '#f44336' : '';
+            deafenBtn.style.color = _voiceDeafened ? '#fff' : '';
+            deafenBtn.title = _voiceDeafened ? 'Undeafen (unmute incoming audio)' : 'Deafen (mute incoming audio)';
+            // Mute/unmute all peer audio elements
+            var peerAudioEls = document.querySelectorAll('audio[data-peer]');
+            peerAudioEls.forEach(function (el) { el.muted = _voiceDeafened; });
+        });
+
+        // ── MASTER VOLUME ──
+        var masterVol = document.getElementById('voice-master-volume');
+        var masterVolVal = document.getElementById('voice-master-volume-val');
+        if (masterVol) masterVol.addEventListener('input', function () {
+            _voiceMasterVolume = parseInt(masterVol.value, 10);
+            if (masterVolVal) masterVolVal.textContent = _voiceMasterVolume + '%';
+            // Apply to all peer audio elements
+            var peerAudioEls = document.querySelectorAll('audio[data-peer]');
+            peerAudioEls.forEach(function (el) { el.volume = _voiceMasterVolume / 100; });
+        });
+
+        if (refreshBtn) refreshBtn.addEventListener('click', function () {
+            vscode.postMessage({ command: 'nostrFetchVoiceRooms' });
+            vscode.postMessage({ command: 'nostrGetVoiceRooms' });
+        });
+        function showCreateForm() {
+            var form = document.getElementById('voice-create-form');
+            var onboard = document.getElementById('voice-onboarding');
+            var list = document.getElementById('voice-room-list');
+            if (form) form.style.display = 'block';
+            if (onboard) onboard.style.display = 'none';
+            if (list) list.style.display = 'none';
+            var nameInput = document.getElementById('voice-room-name');
+            if (nameInput) nameInput.focus();
+        }
+        if (createBtn) createBtn.addEventListener('click', showCreateForm);
+        if (heroCreateBtn) heroCreateBtn.addEventListener('click', showCreateForm);
+        if (createSubmit) createSubmit.addEventListener('click', function () {
+            var nameEl = document.getElementById('voice-room-name');
+            var summaryEl = document.getElementById('voice-room-summary');
+            var name = nameEl ? nameEl.value.trim() : '';
+            if (!name) return;
+            vscode.postMessage({ command: 'nostrCreateVoiceRoom', name: name, summary: summaryEl ? summaryEl.value.trim() : '' });
+            if (nameEl) nameEl.value = '';
+            if (summaryEl) summaryEl.value = '';
+            var form = document.getElementById('voice-create-form');
+            if (form) form.style.display = 'none';
+        });
+        if (createCancel) createCancel.addEventListener('click', function () {
+            var form = document.getElementById('voice-create-form');
+            if (form) form.style.display = 'none';
+        });
+        if (leaveBtn) leaveBtn.addEventListener('click', function () {
+            if (_activeRoomATag) {
+                vscode.postMessage({ command: 'nostrLeaveRoom', roomATag: _activeRoomATag });
+            }
+        });
+        if (raiseHandBtn) raiseHandBtn.addEventListener('click', function () {
+            if (_activeRoomATag) {
+                vscode.postMessage({ command: 'nostrRaiseHand', roomATag: _activeRoomATag });
+            }
+        });
+        if (chatSendBtn) chatSendBtn.addEventListener('click', function () {
+            if (_activeRoomATag && chatInput && chatInput.value.trim()) {
+                vscode.postMessage({ command: 'nostrSendLiveChat', roomATag: _activeRoomATag, message: chatInput.value.trim() });
+                chatInput.value = '';
+            }
+        });
+        if (chatInput) chatInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && !e.shiftKey && _activeRoomATag && chatInput.value.trim()) {
+                e.preventDefault();
+                vscode.postMessage({ command: 'nostrSendLiveChat', roomATag: _activeRoomATag, message: chatInput.value.trim() });
+                chatInput.value = '';
+            }
+        });
+        // Mic toggle — uses ffmpeg native capture via extension host (no browser permissions needed)
+        if (micToggle) micToggle.addEventListener('click', function () {
+            if (_voicePTTMode) {
+                // In PTT mode, clicking the button is a no-op (use PTT key instead)
+                // But allow toggling PTT mode off by clicking
+                return;
+            }
+            if (!_voiceMicOn) {
+                // Turn mic ON — request ffmpeg capture from extension
+                var micLabel = document.getElementById('voice-mic-label');
+                if (micLabel) micLabel.textContent = 'STARTING...';
+                vscode.postMessage({ command: 'startMicCapture', device: _voiceSelectedDevice || undefined });
+            } else {
+                // Turn mic OFF
+                vscode.postMessage({ command: 'stopMicCapture' });
+            }
+        });
+    })();
+
+    // ── THEME IMPORT HANDLERS ──
+    (function () {
+        var applyBtn = document.getElementById('theme-accent-apply');
+        var resetBtn = document.getElementById('theme-accent-reset');
+        var input = document.getElementById('theme-accent-input');
+        var preview = document.getElementById('theme-accent-preview');
+        if (applyBtn) applyBtn.addEventListener('click', function () {
+            var val = input ? input.value.trim() : '';
+            if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+                document.documentElement.style.setProperty('--accent', val);
+                if (preview) preview.style.background = val;
+            }
+        });
+        if (resetBtn) resetBtn.addEventListener('click', function () {
+            document.documentElement.style.removeProperty('--accent');
+            if (preview) preview.style.background = 'var(--accent)';
+            if (input) input.value = '';
+        });
+        if (input) input.addEventListener('input', function () {
+            var val = input.value.trim();
+            if (/^#[0-9a-fA-F]{6}$/.test(val) && preview) {
+                preview.style.background = val;
+            }
+        });
+    })();
 
     // ── NOSTR EVENT HANDLER ──
     function handleNostrEvent(event) {
@@ -2769,6 +3397,25 @@
             _workflowEvents.push(event);
             _workflowEvents.sort(function (a, b) { return b.created_at - a.created_at; });
             renderWorkflowFeed();
+        } else if (event.kind === 25050) {
+            // WebRTC signaling event — extract peer ID for P2P voice
+            // Skip our own events
+            if (event.pubkey === _nostrPubkey) return;
+            try {
+                var payload = JSON.parse(event.content || '{}');
+                // Check if this is a peerjs-offer with a peerId
+                var signalTag = (event.tags || []).find(function (t) { return t[0] === 'type'; });
+                var signalType = signalTag ? signalTag[1] : '';
+                if (signalType === 'peerjs-offer' && payload.peerId && VoiceP2P.isConnected()) {
+                    // Check if this is for our current room
+                    var roomTag = (event.tags || []).find(function (t) { return t[0] === 'a'; });
+                    var roomATag = roomTag ? roomTag[1] : '';
+                    if (roomATag && roomATag === _activeRoomATag) {
+                        console.log('[Voice] Peer discovered via Nostr:', payload.peerId);
+                        VoiceP2P.connectToPeer(payload.peerId);
+                    }
+                }
+            } catch (e) { console.warn('[Voice] Failed to parse WebRTC signal:', e); }
         }
     }
 
@@ -2849,6 +3496,159 @@
         _onlineUsers = users || [];
         var el = document.getElementById('online-count');
         if (el) el.textContent = _onlineUsers.length;
+    }
+
+    // ── NIP-53: VOICE ROOM HANDLERS ──
+    function handleVoiceRoomUpdate(room) {
+        if (!room) return;
+        var idx = _voiceRooms.findIndex(function (r) { return r.aTag === room.aTag; });
+        if (idx >= 0) { _voiceRooms[idx] = room; } else { _voiceRooms.push(room); }
+        renderVoiceRoomList();
+    }
+    function handleVoiceRoomList(rooms) {
+        _voiceRooms = rooms || [];
+        renderVoiceRoomList();
+    }
+    function handleVoiceLiveChat(msg) {
+        if (!msg.event || msg.roomATag !== _activeRoomATag) return;
+        if (_voiceChatMessages.some(function (m) { return m.id === msg.event.id; })) return;
+        _voiceChatMessages.push(msg.event);
+        if (_voiceChatMessages.length > 200) _voiceChatMessages = _voiceChatMessages.slice(-200);
+        renderVoiceLiveChat();
+    }
+    function handleVoiceRoomPresence(presence) {
+        if (!presence || presence.roomATag !== _activeRoomATag) return;
+        _activeRoomParticipants[presence.pubkey] = presence;
+        renderVoiceParticipants();
+    }
+    function handleVoiceRoomJoined(msg) {
+        _activeRoomATag = msg.roomATag;
+        _voiceChatMessages = [];
+        _activeRoomParticipants = {};
+        _voiceMicOn = false;
+        _voiceRoomJoinTime = Date.now();
+        // Start P2P voice connection for this room
+        VoiceP2P.join(_activeRoomATag);
+        var onboardEl = document.getElementById('voice-onboarding');
+        var listEl = document.getElementById('voice-room-list');
+        var createEl = document.getElementById('voice-create-form');
+        var activeEl = document.getElementById('voice-active-room');
+        if (onboardEl) onboardEl.style.display = 'none';
+        if (listEl) listEl.style.display = 'none';
+        if (createEl) createEl.style.display = 'none';
+        if (activeEl) activeEl.style.display = 'flex';
+        var titleEl = document.getElementById('voice-room-title');
+        if (titleEl && msg.room) titleEl.textContent = msg.room.name || 'Room';
+        var badgeEl = document.getElementById('voice-room-status-badge');
+        if (badgeEl && msg.room) badgeEl.textContent = (msg.room.status || 'open').toUpperCase();
+        // Reset mic button
+        var micBtn = document.getElementById('voice-mic-toggle');
+        var micLabel = document.getElementById('voice-mic-label');
+        if (micBtn) micBtn.classList.remove('active');
+        if (micLabel) micLabel.textContent = 'MIC OFF';
+        // Start room timer
+        if (_voiceRoomTimer) clearInterval(_voiceRoomTimer);
+        _voiceRoomTimer = setInterval(function () {
+            var elapsed = Math.floor((Date.now() - _voiceRoomJoinTime) / 1000);
+            var mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            var secs = String(elapsed % 60).padStart(2, '0');
+            var timerEl = document.getElementById('voice-room-timer');
+            if (timerEl) timerEl.textContent = mins + ':' + secs;
+        }, 1000);
+        renderVoiceParticipants();
+        renderVoiceLiveChat();
+    }
+    function handleVoiceRoomLeft() {
+        _activeRoomATag = null;
+        _voiceChatMessages = [];
+        _activeRoomParticipants = {};
+        _voiceMicOn = false;
+        if (_voiceRoomTimer) { clearInterval(_voiceRoomTimer); _voiceRoomTimer = null; }
+        // Tear down audio bridge and P2P voice
+        _stopAudioBridge();
+        VoiceP2P.leave();
+        // Stop local mic
+        vscode.postMessage({ command: 'stopMicCapture' });
+        var onboardEl = document.getElementById('voice-onboarding');
+        var listEl = document.getElementById('voice-room-list');
+        var activeEl = document.getElementById('voice-active-room');
+        if (activeEl) activeEl.style.display = 'none';
+        // Show onboarding or room list
+        if (_voiceRooms.length > 0) {
+            if (onboardEl) onboardEl.style.display = 'none';
+            if (listEl) listEl.style.display = 'block';
+        } else {
+            if (onboardEl) onboardEl.style.display = 'block';
+            if (listEl) listEl.style.display = 'none';
+        }
+    }
+    function renderVoiceRoomList() {
+        var el = document.getElementById('voice-room-list');
+        var onboardEl = document.getElementById('voice-onboarding');
+        if (!el) return;
+        var openRooms = _voiceRooms.filter(function (r) { return r.status !== 'closed'; });
+        if (openRooms.length === 0) {
+            el.style.display = 'none';
+            if (onboardEl && !_activeRoomATag) onboardEl.style.display = 'block';
+            return;
+        }
+        if (onboardEl) onboardEl.style.display = 'none';
+        el.style.display = 'block';
+        el.innerHTML = openRooms.map(function (room) {
+            var statusClass = room.status || 'open';
+            var pCount = room.currentParticipants || room.participants.length || 0;
+            return '<div class="voice-room-card" data-room-atag="' + _esc(room.aTag) + '">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+                '<span class="voice-room-name">' + _esc(room.name) + '</span>' +
+                '<span class="voice-room-status-pill ' + statusClass + '">' + statusClass.toUpperCase() + '</span>' +
+                '</div>' +
+                (room.summary ? '<div class="voice-room-meta">' + _esc(room.summary) + '</div>' : '') +
+                '<div class="voice-room-meta" style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">' +
+                '<span>Host: ' + displayName(room.hostPubkey) + '</span>' +
+                '<span style="color:var(--accent);">' + pCount + ' &#128101;</span>' +
+                '</div>' +
+                '<div style="margin-top:6px;"><button class="btn-dim" style="font-size:9px;width:100%;">JOIN ROOM</button></div>' +
+                '</div>';
+        }).join('');
+        el.querySelectorAll('.voice-room-card').forEach(function (card) {
+            card.addEventListener('click', function () {
+                var aTag = card.dataset.roomAtag;
+                if (aTag) vscode.postMessage({ command: 'nostrJoinRoom', roomATag: aTag });
+            });
+        });
+    }
+    function renderVoiceParticipants() {
+        var el = document.getElementById('voice-participants');
+        if (!el) return;
+        var parts = Object.values(_activeRoomParticipants);
+        if (parts.length === 0) {
+            el.innerHTML = '<div class="voice-participant-card"><div class="vp-avatar">&#128100;</div><div class="vp-name">You</div><div class="vp-role">JOINED</div><div class="vp-mic">' + (_voiceMicOn ? '&#127908;' : '&#128263;') + '</div></div>';
+            return;
+        }
+        el.innerHTML = parts.map(function (p) {
+            var isHost = p.role === 'host';
+            var cls = 'voice-participant-card' + (isHost ? ' host' : '');
+            var hand = p.handRaised ? '<div class="vp-hand">&#9995;</div>' : '';
+            var mic = '<div class="vp-mic">&#127908;</div>';
+            var initials = displayName(p.pubkey).slice(0, 2).toUpperCase();
+            return '<div class="' + cls + '">' +
+                hand + mic +
+                '<div class="vp-avatar">' + initials + '</div>' +
+                '<div class="vp-name">' + displayName(p.pubkey) + '</div>' +
+                (isHost ? '<div class="vp-role">HOST</div>' : '') +
+                '</div>';
+        }).join('');
+    }
+    function renderVoiceLiveChat() {
+        var el = document.getElementById('voice-live-chat');
+        if (!el) return;
+        el.innerHTML = _voiceChatMessages.map(function (m) {
+            return '<div class="voice-chat-msg">' +
+                '<span class="voice-chat-author">' + shortPubkey(m.pubkey) + '</span>' +
+                '<span class="voice-chat-text">' + _esc(m.content) + '</span>' +
+                '</div>';
+        }).join('');
+        el.scrollTop = el.scrollHeight;
     }
 
     // ── BLOCK LIST ──

@@ -6,6 +6,7 @@ import { ModelEvaluator } from '../evaluation';
 import { ReputationChain } from '../reputationChain';
 import { MarketplaceIndex } from '../marketplaceSearch';
 import { IPFSPinningService } from '../ipfsPinning';
+import { startMicCapture, stopMicCapture, setMicSensitivity, setMicNoiseGate, listAudioDevices, isMicCapturing, getAudioWsPort, startAudioWsServer } from '../extension';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
@@ -86,6 +87,17 @@ export class CouncilPanel {
                 this.send({ type: 'nostrZapReceipt', eventId, senderPubkey, amountSats: Math.floor(amountMsats / 1000), receipt });
             });
 
+            // Forward NIP-53 voice room events
+            this.nostr.onVoiceRoom((room) => {
+                this.send({ type: 'nostrVoiceRoom', room });
+            });
+            this.nostr.onLiveChat(({ roomATag, event }) => {
+                this.send({ type: 'nostrLiveChat', roomATag, event });
+            });
+            this.nostr.onRoomPresence((presence) => {
+                this.send({ type: 'nostrRoomPresence', presence });
+            });
+
             // Push identity update instantly whenever a relay connects or disconnects.
             this.nostr.onRelayChange(() => {
                 this.send({
@@ -103,6 +115,7 @@ export class CouncilPanel {
             this.disposables.push({ dispose: () => clearInterval(presenceInterval) });
             this.nostr.fetchDMs();
             this.nostr.fetchPresence();
+            this.nostr.fetchVoiceRooms();
         }
 
         // Forward GitHub auth changes
@@ -121,19 +134,22 @@ export class CouncilPanel {
 
         const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js');
         const svgPanZoomPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'svg-pan-zoom.min.js');
+        const peerjsPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'peerjs.min.js');
 
         this.panel = vscode.window.createWebviewPanel(
             'championCouncil', 'Champion Council', vscode.ViewColumn.One,
             {
                 enableScripts: true,
                 retainContextWhenHidden: true,
-                localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')]
+                localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
+                enableForms: true
             }
         );
 
         const scriptUri = this.panel.webview.asWebviewUri(mediaPath);
         const svgPanZoomUri = this.panel.webview.asWebviewUri(svgPanZoomPath);
-        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri);
+        const peerjsUri = this.panel.webview.asWebviewUri(peerjsPath);
+        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource);
 
         this.panel.webview.onDidReceiveMessage(
             (msg) => {
@@ -688,6 +704,189 @@ export class CouncilPanel {
             case 'nostrGetOnlineUsers': {
                 if (this.nostr) {
                     this.send({ type: 'nostrOnlineUsers', users: this.nostr.getOnlineUsers() });
+                }
+                break;
+            }
+            // ── NIP-53: VOICE ROOMS ──
+            case 'nostrCreateVoiceRoom': {
+                if (this.nostr && msg.name) {
+                    try {
+                        await this.nostr.createVoiceRoom({ name: msg.name, summary: msg.summary, serviceUrl: msg.serviceUrl, streamingUrl: msg.streamingUrl });
+                        this.send({ type: 'nostrVoiceRoomCreated' });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrFetchVoiceRooms': {
+                if (this.nostr) { this.nostr.fetchVoiceRooms(); }
+                break;
+            }
+            case 'nostrGetVoiceRooms': {
+                if (this.nostr) {
+                    this.send({ type: 'nostrVoiceRooms', rooms: this.nostr.getVoiceRooms() });
+                }
+                break;
+            }
+            case 'nostrJoinRoom': {
+                if (this.nostr && msg.roomATag) {
+                    try {
+                        await this.nostr.sendRoomPresence(msg.roomATag);
+                        this.nostr.fetchLiveChat(msg.roomATag);
+                        this.nostr.fetchRoomPresence(msg.roomATag);
+                        const room = this.nostr.getVoiceRoom(msg.roomATag);
+                        this.send({ type: 'nostrRoomJoined', roomATag: msg.roomATag, room: room || null });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrLeaveRoom': {
+                if (this.nostr && msg.roomATag) {
+                    try {
+                        await this.nostr.leaveRoom(msg.roomATag);
+                        this.send({ type: 'nostrRoomLeft', roomATag: msg.roomATag });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrSendLiveChat': {
+                if (this.nostr && msg.roomATag && msg.message) {
+                    try {
+                        await this.nostr.sendLiveChat(msg.roomATag, msg.message);
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrRaiseHand': {
+                if (this.nostr && msg.roomATag) {
+                    try {
+                        await this.nostr.sendRoomPresence(msg.roomATag, true);
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrUpdateRoomStatus': {
+                if (this.nostr && msg.roomId && msg.status) {
+                    try {
+                        await this.nostr.updateRoomStatus(msg.roomId, msg.status);
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            // ── NIP-58: BADGES ──
+            case 'nostrCreateBadge': {
+                if (this.nostr && msg.id && msg.name) {
+                    try {
+                        await this.nostr.createBadge({ id: msg.id, name: msg.name, description: msg.description || '', image: msg.image });
+                        this.send({ type: 'nostrBadgeCreated', id: msg.id });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrAwardBadge': {
+                if (this.nostr && msg.badgeId && msg.pubkeys) {
+                    try {
+                        await this.nostr.awardBadge(msg.badgeId, msg.pubkeys);
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            // ── NIP-88: POLLS ──
+            case 'nostrCreatePoll': {
+                if (this.nostr && msg.question && msg.options) {
+                    try {
+                        const ev = await this.nostr.createPoll(msg.question, msg.options, msg.expiresIn);
+                        this.send({ type: 'nostrPollCreated', eventId: ev.id });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            case 'nostrVotePoll': {
+                if (this.nostr && msg.pollEventId && msg.optionIndices) {
+                    try {
+                        await this.nostr.votePoll(msg.pollEventId, msg.optionIndices);
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            // ── NIP-90: DATA VENDING MACHINES ──
+            case 'nostrSubmitDvmJob': {
+                if (this.nostr && msg.jobKind && msg.inputs) {
+                    try {
+                        const ev = await this.nostr.submitDvmJob(msg.jobKind, msg.inputs, msg.params, msg.bidMsats);
+                        this.send({ type: 'nostrDvmJobSubmitted', eventId: ev.id });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            // ── NIP-39: EXTERNAL IDENTITY ──
+            case 'nostrPublishIdentity': {
+                if (this.nostr && msg.claims) {
+                    try {
+                        await this.nostr.publishExternalIdentity(msg.claims);
+                        this.send({ type: 'nostrIdentityPublished' });
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
+                }
+                break;
+            }
+            // ── MIC CAPTURE (ffmpeg native, on-demand) ──
+            case 'startMicCapture': {
+                try {
+                    // Ensure WebSocket audio bridge is running for peer streaming
+                    if (getAudioWsPort() === 0) {
+                        await startAudioWsServer();
+                    }
+                    const audioWsPort = getAudioWsPort();
+                    const result = await startMicCapture((level: number) => {
+                        this.send({ type: 'micLevel', level: Math.round(level) });
+                    }, msg.device);
+                    if (result.success) {
+                        this.send({ type: 'micStarted', device: result.device, audioWsPort });
+                    } else {
+                        this.send({ type: 'micError', error: result.error });
+                    }
+                } catch (err: any) {
+                    this.send({ type: 'micError', error: err.message });
+                }
+                break;
+            }
+            case 'stopMicCapture': {
+                stopMicCapture();
+                this.send({ type: 'micStopped' });
+                break;
+            }
+            case 'setMicSensitivity': {
+                if (typeof msg.value === 'number') setMicSensitivity(msg.value);
+                break;
+            }
+            case 'setMicNoiseGate': {
+                if (typeof msg.value === 'number') setMicNoiseGate(msg.value);
+                break;
+            }
+            case 'listAudioDevices': {
+                try {
+                    const devices = await listAudioDevices();
+                    this.send({ type: 'audioDevices', devices });
+                } catch (err: any) {
+                    this.send({ type: 'audioDevices', devices: [] });
+                }
+                break;
+            }
+            // ── P2P VOICE (PeerJS via Nostr signaling) ──
+            case 'voiceP2PReady': {
+                // Webview created a PeerJS peer — broadcast our peer ID to the room via Nostr
+                if (this.nostr && msg.peerId && msg.roomId) {
+                    try {
+                        await this.nostr.sendWebRTCSignal('*', msg.roomId, 'peerjs-offer', JSON.stringify({ peerId: msg.peerId }));
+                    } catch (err: any) { console.warn('[VoiceP2P] Failed to broadcast peer ID:', err.message); }
+                }
+                break;
+            }
+            // ── WEBRTC SIGNALING ──
+            case 'nostrWebRTCSignal': {
+                if (this.nostr && msg.targetPubkey && msg.roomATag && msg.signalType && msg.payload) {
+                    try {
+                        await this.nostr.sendWebRTCSignal(msg.targetPubkey, msg.roomATag, msg.signalType, msg.payload);
+                    } catch (err: any) { this.send({ type: 'nostrError', error: err.message }); }
                 }
                 break;
             }
@@ -2305,7 +2504,7 @@ export class CouncilPanel {
     // HTML Generation - Operations Facility UI
     // ═══════════════════════════════════════════════════════════════
 
-    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri): string {
+    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string): string {
         const toolRegistryJSON = JSON.stringify(TOOL_CATEGORIES);
 
         return `<!DOCTYPE html>
@@ -2313,6 +2512,7 @@ export class CouncilPanel {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource || "'self'"} 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src ${cspSource || "'self'"} https: data:; connect-src ws://127.0.0.1:* ${cspSource || "'self'"}; media-src blob:; font-src ${cspSource || "'self'"};">
 <title>Champion Council</title>
 <style>
 :root {
@@ -4148,6 +4348,88 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     font-size: 11px;
     text-align: center;
 }
+/* ── VOICE ROOMS ── */
+.voice-discord-bar {
+    display: flex; align-items: center; padding: 6px 12px;
+    background: #1a1a2e; border-bottom: 1px solid var(--border); gap: 8px;
+}
+.voice-onboarding {
+    text-align: center; padding: 32px 16px;
+}
+.voice-big-btn {
+    background: var(--accent); color: #fff; border: none; padding: 8px 24px;
+    border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer;
+    transition: opacity 0.2s;
+}
+.voice-big-btn:hover { opacity: 0.85; }
+.voice-room-list { padding: 8px; }
+.voice-room-card {
+    border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+    margin-bottom: 6px; cursor: pointer; transition: all 0.2s; background: var(--surface);
+}
+.voice-room-card:hover { border-color: var(--accent); background: #1a1a2e; }
+.voice-room-card .voice-room-name { font-weight: 600; font-size: 11px; color: var(--text); }
+.voice-room-card .voice-room-meta { font-size: 9px; color: var(--text-dim); margin-top: 2px; }
+.voice-room-card .voice-room-status-pill {
+    display: inline-block; font-size: 8px; padding: 1px 6px;
+    border-radius: 8px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.voice-room-card .voice-room-status-pill.open { background: #1a3a1a; color: #4caf50; }
+.voice-room-card .voice-room-status-pill.private { background: #3a2a1a; color: #ff9800; }
+.voice-room-card .voice-room-status-pill.closed { background: #3a1a1a; color: #f44336; }
+.voice-create-form { padding: 12px; }
+.voice-active-room { display: flex; flex-direction: column; height: 100%; }
+.voice-room-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.voice-room-status { font-size: 8px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; background: #1a3a1a; color: #4caf50; }
+.voice-audio-controls {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: #0d0d1a; border-bottom: 1px solid var(--border);
+}
+.voice-mic-btn {
+    display: flex; align-items: center; gap: 4px; padding: 4px 12px;
+    border-radius: 16px; border: 1px solid #555; background: #2a2a2a;
+    color: var(--text-dim); cursor: pointer; font-size: 10px; transition: all 0.2s;
+}
+.voice-mic-btn.active { border-color: #4caf50; background: #1a3a1a; color: #4caf50; }
+.voice-mic-btn.active #voice-mic-label { color: #4caf50; }
+.voice-mic-level {
+    width: 60px; height: 6px; border-radius: 3px; background: #1a1a1a;
+    overflow: hidden; border: 1px solid #333;
+}
+.voice-mic-level-bar { height: 100%; width: 0%; background: #4caf50; transition: width 0.1s; border-radius: 3px; }
+.voice-participants-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); min-height: 40px;
+}
+.voice-participant-card {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 8px 4px; border-radius: 8px; background: var(--surface);
+    border: 1px solid var(--border); font-size: 9px; text-align: center; position: relative;
+}
+.voice-participant-card.speaking { border-color: #4caf50; box-shadow: 0 0 6px #4caf5040; }
+.voice-participant-card.host { border-color: var(--accent); }
+.voice-participant-card .vp-avatar { width: 28px; height: 28px; border-radius: 50%; background: #333; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+.voice-participant-card .vp-name { color: var(--text); font-size: 8px; max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-participant-card .vp-role { font-size: 7px; color: var(--accent); text-transform: uppercase; }
+.voice-participant-card .vp-mic { position: absolute; top: 2px; right: 2px; font-size: 8px; }
+.voice-participant-card .vp-hand { position: absolute; top: 2px; left: 2px; font-size: 10px; }
+.voice-live-chat {
+    flex: 1; overflow-y: auto; padding: 8px 12px;
+    min-height: 80px; max-height: 180px; font-size: 10px;
+}
+.voice-chat-msg { margin-bottom: 4px; line-height: 1.4; }
+.voice-chat-msg .voice-chat-author { color: var(--accent); font-weight: 600; font-size: 9px; }
+.voice-chat-msg .voice-chat-text { color: var(--text); margin-left: 4px; }
+.voice-chat-msg .voice-chat-time { color: var(--text-dim); font-size: 8px; margin-left: 4px; }
+.voice-chat-input-row {
+    display: flex; gap: 4px; padding: 8px 12px; border-top: 1px solid var(--border);
+}
+.voice-chat-input-row .chat-input { flex: 1; }
+.btn-danger { background: #5a1a1a !important; color: #f44336 !important; }
+.btn-danger:hover { background: #7a2a2a !important; }
 </style>
 </head>
 <body>
@@ -4466,6 +4748,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <button class="active" data-ctab="chat">CHAT</button>
         <button data-ctab="dms">DMs</button>
         <button data-ctab="marketplace">MARKETPLACE</button>
+        <button data-ctab="voice">VOICE</button>
         <button data-ctab="privacy">PRIVACY</button>
         <button data-ctab="appearance">UX</button>
     </div>
@@ -4558,6 +4841,163 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
             </div>
             <!-- DETAIL OVERLAY (slides over the feed) -->
             <div class="wf-detail-overlay" id="wf-detail-overlay"></div>
+        </div>
+    </div>
+
+    <!-- ── VOICE ROOMS SUB-TAB ── -->
+    <div class="community-subtab" id="ctab-voice" style="display:none;">
+        <!-- Nostr identity bar -->
+        <div class="voice-discord-bar" id="voice-identity-bar">
+            <span style="font-size:9px;color:var(--text-dim);flex:1;" id="voice-identity-label">Nostr identity loading...</span>
+            <span style="font-size:8px;color:var(--accent);" id="voice-relay-status">0 relays</span>
+        </div>
+
+        <div class="community-panel" style="min-height:350px;">
+            <!-- Header with controls -->
+            <div class="community-panel-header">
+                <span>VOICE ROOMS</span>
+                <div style="display:flex;gap:4px;">
+                    <button class="btn-dim" id="voice-refresh-btn" title="Refresh rooms">&#8635;</button>
+                    <button class="btn-dim" id="voice-create-btn">+ NEW ROOM</button>
+                </div>
+            </div>
+
+            <!-- Onboarding / empty state -->
+            <div id="voice-onboarding" class="voice-onboarding">
+                <div style="font-size:24px;margin-bottom:8px;">&#127908;</div>
+                <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px;">Voice &amp; Text Rooms</div>
+                <div style="font-size:10px;color:var(--text-dim);line-height:1.6;max-width:280px;margin:0 auto 12px;">
+                    Create or join rooms to voice chat and text chat with other developers in real-time.
+                    Rooms are signaled through Nostr relays using NIP-53.
+                </div>
+                <div style="font-size:9px;color:var(--text-dim);margin-bottom:12px;">
+                    <strong style="color:var(--accent);">&#9679;</strong> 2 relays connected &nbsp;|&nbsp;
+                    <span id="voice-user-count">0</span> users online
+                </div>
+                <button class="voice-big-btn" id="voice-create-btn-hero">+ CREATE A ROOM</button>
+                <div style="font-size:8px;color:var(--text-dim);margin-top:8px;">or join an existing room below</div>
+            </div>
+
+            <!-- Room list -->
+            <div id="voice-room-list" class="voice-room-list" style="display:none;"></div>
+
+            <!-- Create room form -->
+            <div id="voice-create-form" class="voice-create-form" style="display:none;">
+                <div class="section-head" style="margin-top:0;">CREATE ROOM</div>
+                <input type="text" id="voice-room-name" class="chat-input" placeholder="Room name (e.g. 'Code Review', 'Standup')" style="margin-bottom:6px;" />
+                <input type="text" id="voice-room-summary" class="chat-input" placeholder="What's this room about? (optional)" style="margin-bottom:6px;" />
+                <div style="display:flex;gap:6px;">
+                    <button class="btn-dim" id="voice-create-submit">CREATE &amp; JOIN</button>
+                    <button class="btn-dim" id="voice-create-cancel">CANCEL</button>
+                </div>
+            </div>
+
+            <!-- Active room view -->
+            <div id="voice-active-room" class="voice-active-room" style="display:none;">
+                <div class="voice-room-header">
+                    <div>
+                        <strong id="voice-room-title"></strong>
+                        <span class="voice-room-status" id="voice-room-status-badge">OPEN</span>
+                    </div>
+                    <div style="display:flex;gap:4px;align-items:center;">
+                        <span id="voice-room-timer" style="font-size:8px;color:var(--text-dim);font-family:var(--mono);">00:00</span>
+                    </div>
+                </div>
+
+                <!-- Audio controls bar -->
+                <div class="voice-audio-controls">
+                    <button class="voice-mic-btn" id="voice-mic-toggle" title="Toggle Microphone">
+                        <span id="voice-mic-icon">&#127908;</span>
+                        <span id="voice-mic-label">MIC OFF</span>
+                    </button>
+                    <div class="voice-mic-level" id="voice-mic-level">
+                        <div class="voice-mic-level-bar" id="voice-mic-level-bar"></div>
+                    </div>
+                    <button class="btn-dim" id="voice-deafen-btn" title="Deafen (mute incoming audio)" style="font-size:12px;">&#128266;</button>
+                    <button class="btn-dim" id="voice-raise-hand" title="Raise Hand" style="font-size:12px;">&#9995;</button>
+                    <button class="btn-dim" id="voice-settings-btn" title="Audio Settings" style="font-size:12px;">&#9881;</button>
+                    <div style="flex:1;"></div>
+                    <button class="btn-dim btn-danger" id="voice-leave-btn">LEAVE ROOM</button>
+                </div>
+
+                <!-- Voice Settings Panel (collapsible) -->
+                <div id="voice-settings-panel" style="display:none;padding:10px 12px;background:var(--surface2);border-bottom:1px solid var(--border);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                        <span style="font-size:10px;font-weight:bold;color:var(--accent);letter-spacing:1px;">AUDIO SETTINGS</span>
+                        <button class="btn-dim" id="voice-settings-close" style="font-size:9px;padding:2px 6px;">✕</button>
+                    </div>
+
+                    <!-- Input Device -->
+                    <div style="margin-bottom:10px;">
+                        <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:3px;">INPUT DEVICE</label>
+                        <select id="voice-input-device" style="width:100%;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 6px;font-size:10px;font-family:var(--mono);border-radius:3px;">
+                            <option value="">Default Microphone</option>
+                        </select>
+                    </div>
+
+                    <!-- Mic Mode: Open Mic / Push-to-Talk -->
+                    <div style="margin-bottom:10px;">
+                        <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:3px;">MIC MODE</label>
+                        <div style="display:flex;gap:4px;">
+                            <button class="btn-dim" id="voice-mode-open" style="flex:1;font-size:9px;padding:4px;background:var(--accent);color:#000;font-weight:bold;">OPEN MIC</button>
+                            <button class="btn-dim" id="voice-mode-ptt" style="flex:1;font-size:9px;padding:4px;">PUSH TO TALK</button>
+                        </div>
+                        <div id="voice-ptt-key-row" style="display:none;margin-top:4px;gap:4px;align-items:center;">
+                            <span style="font-size:8px;color:var(--text-dim);">PTT Key:</span>
+                            <button class="btn-dim" id="voice-ptt-key-btn" style="font-size:9px;padding:2px 8px;font-family:var(--mono);">Space</button>
+                            <span style="font-size:7px;color:var(--text-dim);">(click to rebind)</span>
+                        </div>
+                    </div>
+
+                    <!-- Sensitivity + Noise Gate row -->
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+                        <div>
+                            <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:2px;">SENSITIVITY</label>
+                            <input type="range" id="voice-sensitivity" min="0.5" max="4" step="0.1" value="1.5" style="width:100%;accent-color:var(--accent);" />
+                            <div style="display:flex;justify-content:space-between;font-size:7px;color:var(--text-dim);">
+                                <span>Low</span><span id="voice-sensitivity-val" style="color:var(--text);">1.5x</span><span>High</span>
+                            </div>
+                        </div>
+                        <div>
+                            <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:2px;">NOISE GATE</label>
+                            <input type="range" id="voice-noisegate" min="0" max="30" step="1" value="5" style="width:100%;accent-color:var(--accent);" />
+                            <div style="display:flex;justify-content:space-between;font-size:7px;color:var(--text-dim);">
+                                <span>Off</span><span id="voice-noisegate-val" style="color:var(--text);">5</span><span>Aggressive</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Master Volume -->
+                    <div style="margin-bottom:10px;">
+                        <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:2px;">MASTER VOLUME</label>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                            <span style="font-size:10px;">&#128264;</span>
+                            <input type="range" id="voice-master-volume" min="0" max="100" step="1" value="100" style="flex:1;accent-color:var(--accent);" />
+                            <span id="voice-master-volume-val" style="font-size:9px;color:var(--text);min-width:28px;text-align:right;">100%</span>
+                        </div>
+                    </div>
+
+                    <!-- Level meter -->
+                    <div>
+                        <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:2px;">MIC LEVEL</label>
+                        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+                            <div id="voice-test-bar" style="height:100%;width:0%;background:#4caf50;border-radius:3px;transition:width 0.05s;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Participants grid -->
+                <div class="voice-participants-grid" id="voice-participants"></div>
+
+                <!-- Live chat -->
+                <div class="voice-live-chat" id="voice-live-chat">
+                    <div style="color:var(--text-dim);font-size:9px;text-align:center;padding:12px;">Room chat will appear here</div>
+                </div>
+                <div class="voice-chat-input-row">
+                    <input type="text" id="voice-chat-input" class="chat-input" placeholder="Type a message..." />
+                    <button class="btn-dim" id="voice-chat-send">SEND</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -4848,6 +5288,20 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
                 <label>Share Online Presence</label>
                 <button class="toggle-switch on" data-privacy="presenceEnabled" id="priv-presence"></button>
             </div>
+            <div class="privacy-row">
+                <label>Voice Rooms (NIP-53)</label>
+                <button class="toggle-switch on" data-privacy="voiceEnabled" id="priv-voice"></button>
+            </div>
+        </div>
+        <div class="section-head" style="margin-top:16px;">THEME IMPORT</div>
+        <div style="border:1px solid var(--border);padding:12px;margin-bottom:8px;">
+            <div style="font-size:9px;color:var(--text-dim);margin-bottom:8px;">Paste an accent color hex code to personalize the UI. Works with any color picker or Discord accent color.</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+                <input id="theme-accent-input" class="chat-input" placeholder="#7289da" style="width:90px;font-family:var(--mono);" maxlength="7" />
+                <button class="btn-dim" id="theme-accent-apply">APPLY</button>
+                <button class="btn-dim" id="theme-accent-reset">RESET</button>
+                <div id="theme-accent-preview" style="width:18px;height:18px;border-radius:4px;border:1px solid var(--border);background:var(--accent);"></div>
+            </div>
         </div>
         <div class="section-head" style="margin-top:16px;">BLOCKED USERS</div>
         <div class="block-list" id="block-list">
@@ -5046,6 +5500,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 
 <script>window.__CATEGORIES__ = ${toolRegistryJSON};</script>
 <script src="${svgPanZoomUri}"></script>
+${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
 <script src="${scriptUri}"></script>
 </body>
 </html>`;
