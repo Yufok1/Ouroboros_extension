@@ -1056,9 +1056,6 @@ export class CouncilPanel {
                     }
                     const oldContent = await this.gitExec(wsRoot, ['show', hashes[1] + ':' + docPath.relPath]);
                     const newContent = await this.gitExec(wsRoot, ['show', hashes[0] + ':' + docPath.relPath]);
-                    const oldUri = vscode.Uri.parse('untitled:' + docPath.relPath + ' (' + hashes[1].slice(0, 7) + ')');
-                    const newUri = vscode.Uri.parse('untitled:' + docPath.relPath + ' (' + hashes[0].slice(0, 7) + ')');
-                    // Write temp content via virtual docs
                     const tmpDir = path.join(wsRoot, '.bag_tmp');
                     fs.mkdirSync(tmpDir, { recursive: true });
                     const oldFile = path.join(tmpDir, 'old_' + path.basename(docPath.filePath));

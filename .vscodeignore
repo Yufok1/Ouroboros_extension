@@ -36,6 +36,9 @@ package.json.bak
 claudeoctor.txt
 
 # Generated runtime artifacts
+bag_docs/**
+.bag_tmp/**
+observer_loop.json
 felixbag-export-*.txt
 felixbag-export-*.md
 felixbag-export-*.csv
