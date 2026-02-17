@@ -5,7 +5,7 @@ All notable changes to the "Champion Council" extension will be documented in th
 ## [0.7.0] - 2026-02-16
 - **Added**: FelixBag auto-persistence — bag state auto-loads from `.bag_state.json` on MCP server startup, auto-saves on shutdown (atexit), and background-saves every 5 minutes for marathon sessions.
 - **Added**: Cascade chain & graph persistence — `cascade_chain` and `cascade_graph` operations are now backed by FelixBag. State survives process restarts via automatic fallback-on-lookup and re-persist-on-mutation.
-- **Added**: FelixBag → Gist publishing — Memory tab drill-downs include a "Publish to Gist" button (opt-in via `champion.memory.gistPublish` setting, off by default). Creates versioned GitHub Gists from any bag item. Subsequent edits update the same gist. Local version numbers always visible in drill-downs.
+- **Added**: Local git versioning — Memory tab drill-downs include a "Commit Version" button. Writes bag item to `bag_docs/<type>/` and commits to the workspace git repo. Full git history (log, diff, restore) available via standard git commands.
 - **Fixed**: Model loading stability — `plug_model`, `hub_plug`, and `hub_download` now use 10-minute timeout (was 2 min). SSE heartbeat suppressed during long-running operations to prevent false disconnects.
 - **Fixed**: External activity detection on Windows — log poller now uses `readFileSync` + buffer slice instead of `open()`/`read()` which failed silently due to Windows file sharing semantics.
 

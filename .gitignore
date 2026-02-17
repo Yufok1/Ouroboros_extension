@@ -30,6 +30,9 @@ Thumbs.db
 felixbag-export-*
 bag_export.json
 
+# Temp diff files for native VS Code diff viewer
+.bag_tmp/
+
 # Dev artifacts
 *.bak
 Gemini_Generated_Image_*.png

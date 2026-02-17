@@ -212,11 +212,22 @@
                 case 'gistIndexingComplete':
                     handleGistIndexingComplete(msg);
                     break;
-                case 'bagGistResult':
-                    handleBagGistResult(msg);
+                case 'bagCommitResult':
+                    handleBagCommitResult(msg);
                     break;
-                case 'bagGistMeta':
-                    handleBagGistMeta(msg);
+                case 'bagGitInfo':
+                    handleBagGitInfo(msg);
+                    break;
+                case 'bagGitDiffResult':
+                    handleBagGitDiffResult(msg);
+                    break;
+                case 'bagDocOpened':
+                    if (msg.error) mpToast(msg.error, 'error', 3800);
+                    else if (msg.filePath) mpToast('Opened snapshot: ' + msg.filePath, 'success', 2200);
+                    break;
+                case 'gitAvailability':
+                    _gitAvailable = !!msg.available;
+                    _gitProbed = true;
                     break;
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
@@ -241,6 +252,9 @@
                 var memList = document.getElementById('mem-list');
                 if (memList && memList.innerText.indexOf('Loading...') !== -1) {
                     callTool('bag_catalog', {});
+                }
+                if (!_gitProbed) {
+                    vscode.postMessage({ command: 'checkGitAvailable' });
                 }
             }
 
@@ -1764,6 +1778,14 @@
 
     // ── MEMORY INLINE DRILL ──
     var _openDrillKey = null;
+    var _bagDrillCache = {}; // key -> latest resolved bag_get payload for publish prefill
+    var _bagGitMeta = {};    // key -> latest git metadata for drill header context
+    var _gitAvailable = true;  // assume available until probed
+    var _gitProbed = false;    // true after first checkGitAvailable response
+
+    function _safeBagKeyId(key) {
+        return String(key || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
 
     function drillMemItem(key) {
         var contentDiv = document.getElementById('drill-' + key);
@@ -1787,46 +1809,416 @@
     }
     window.drillMemItem = drillMemItem;
 
-    function publishBagToGist(btn) {
+    var _commitConfirmTimer = null;
+    function commitBagVersion(btn) {
         var key = btn.getAttribute('data-bag-key');
         if (!key) return;
-        var gistId = btn.getAttribute('data-gist-id') || null;
-        btn.textContent = gistId ? 'Updating…' : 'Publishing…';
+        if (!_gitAvailable) {
+            mpToast('Git is not available on this system. Install Git to use versioning.', 'error', 4000);
+            return;
+        }
+        // Two-click confirm: first click arms, second click within 3s fires
+        if (btn.dataset.armed !== 'true') {
+            btn.dataset.armed = 'true';
+            btn.textContent = 'Confirm Commit?';
+            btn.style.color = '#f59e0b';
+            clearTimeout(_commitConfirmTimer);
+            _commitConfirmTimer = setTimeout(function () {
+                btn.dataset.armed = '';
+                btn.textContent = 'Commit Version';
+                btn.style.color = 'var(--accent)';
+            }, 3000);
+            return;
+        }
+        // Armed and clicked again — actually commit
+        btn.dataset.armed = '';
+        clearTimeout(_commitConfirmTimer);
+        btn.textContent = 'Committing...';
         btn.disabled = true;
-        vscode.postMessage({ type: 'publishBagToGist', key: key, gistId: gistId, displayName: key });
+        vscode.postMessage({ command: 'commitBagVersion', key: key });
     }
-    window.publishBagToGist = publishBagToGist;
+    window.commitBagVersion = commitBagVersion;
 
-    function handleBagGistResult(msg) {
-        // Find the button for this key and update
-        var safeKey = (msg.key || '').replace(/[^a-zA-Z0-9_-]/g, '_');
-        var btn = document.getElementById('gist-btn-' + safeKey);
+    function handleBagCommitResult(msg) {
+        var safeKey = _safeBagKeyId(msg.key || '');
+        var btn = document.getElementById('commit-btn-' + safeKey);
+
+        if (msg.key) {
+            var existing = _bagGitMeta[msg.key] || {};
+            _bagGitMeta[msg.key] = {
+                key: msg.key,
+                filePath: msg.filePath || existing.filePath || '',
+                headSha: msg.sha || existing.headSha || '',
+                commitCount: (typeof msg.commitCount === 'number') ? msg.commitCount : (existing.commitCount || 0),
+                latestWhen: msg.latestWhen || existing.latestWhen || '',
+                latestSubject: msg.latestSubject || existing.latestSubject || '',
+                diffStat: msg.diffStat || existing.diffStat || ''
+            };
+        }
+
         if (msg.error) {
             if (btn) { btn.textContent = 'Failed'; btn.disabled = false; btn.style.color = '#e11d48'; }
-            console.error('[BagGist]', msg.error);
+            console.error('[BagGit]', msg.error);
+            return;
+        }
+        if (msg.noChanges) {
+            if (btn) { btn.textContent = 'No changes'; btn.disabled = false; }
+            setTimeout(function () { if (btn) btn.textContent = 'Commit Version'; }, 2000);
+            if (msg.key) requestBagGitInfo(msg.key);
             return;
         }
         if (btn) {
-            btn.textContent = msg.updated ? 'Updated' : 'Published';
+            btn.textContent = 'Committed (' + (msg.sha || '') + ')';
             btn.style.color = '#22c55e';
-            btn.setAttribute('data-gist-id', msg.gistId || '');
             setTimeout(function () {
-                btn.textContent = 'Update Gist';
+                btn.textContent = 'Commit Version';
                 btn.style.color = 'var(--accent)';
                 btn.disabled = false;
             }, 2000);
         }
+        if (msg.key) requestBagGitInfo(msg.key);
     }
 
-    function handleBagGistMeta(msg) {
-        var safeKey = (msg.key || '').replace(/[^a-zA-Z0-9_-]/g, '_');
-        var btn = document.getElementById('gist-btn-' + safeKey);
-        if (btn && msg.gistId) {
-            btn.setAttribute('data-gist-id', msg.gistId);
-            btn.textContent = 'Update Gist';
-            btn.title = 'Linked to gist: ' + msg.gistId;
+    function requestBagGitInfo(key) {
+        if (!key) return;
+        var entry = _bagDrillCache[key] || {};
+        var meta = _bagGitMeta[key] || {};
+        vscode.postMessage({
+            command: 'bagGitInspect',
+            key: key,
+            itemType: entry.type || '',
+            filePath: meta.filePath || ''
+        });
+    }
+    window.requestBagGitInfo = requestBagGitInfo;
+
+    function _renderBagGitInfo(key) {
+        if (!key) return;
+        var safeKey = _safeBagKeyId(key);
+        var host = document.getElementById('bag-git-meta-' + safeKey);
+        if (!host) return;
+
+        if (!_gitAvailable && _gitProbed) {
+            host.innerHTML = '<div style="color:var(--text-dim);">Git not available — install Git to enable versioning, diffs, and snapshot history.</div>';
+            return;
+        }
+
+        var meta = _bagGitMeta[key];
+        if (!meta) {
+            host.innerHTML = '<div style="color:var(--text-dim);">Loading git details...</div>';
+            return;
+        }
+
+        if (meta.error) {
+            host.innerHTML = '<div style="color:#e11d48;">' + _esc(meta.error) + '</div>';
+            return;
+        }
+
+        var tracked = !!meta.tracked;
+        var commitCount = Number(meta.commitCount || 0);
+        var filePath = String(meta.filePath || '');
+        var keyJs = _esc(key).replace(/'/g, "\\'");
+        var btnBase = 'font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);border:1px solid var(--border);border-radius:3px;';
+        var openBtn = '<button onclick="openBagSnapshotFile(\'' + keyJs + '\')" style="' + btnBase + 'color:var(--text);">Open Snapshot</button>';
+        var refreshBtn = '<button onclick="requestBagGitInfo(\'' + keyJs + '\')" style="' + btnBase + 'color:var(--text-dim);">Refresh</button>';
+        var diffBtn;
+        if (tracked && commitCount >= 2) {
+            diffBtn = '<button onclick="viewBagSnapshotDiff(\'' + keyJs + '\')" style="' + btnBase + 'color:#60a5fa;">View Last Diff</button>';
+        } else {
+            diffBtn = '<button disabled style="' + btnBase + 'color:var(--text-dim);opacity:0.45;cursor:not-allowed;">View Last Diff</button>';
+        }
+
+        var latestLine = tracked
+            ? ('Latest commit <span style="color:#22c55e;">' + _esc(meta.headSha || '?') + '</span>' +
+               (meta.latestWhen ? ' • ' + _esc(meta.latestWhen) : '') +
+               (meta.latestSubject ? ' • ' + _esc(meta.latestSubject) : ''))
+            : 'Not committed yet.';
+
+        var diffLine = (tracked && commitCount >= 2)
+            ? (meta.diffStat ? _esc(meta.diffStat) : 'Diff available between the last two snapshots.')
+            : 'Create at least two commits to compare changes.';
+
+        host.innerHTML =
+            '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">' +
+                '<div style="min-width:0;">' +
+                    '<div style="color:var(--text);">Snapshot file: <span style="color:var(--accent);">' + _esc(filePath || 'bag_docs/...') + '</span></div>' +
+                    '<div style="color:var(--text-dim);margin-top:2px;">' + latestLine + ' • ' + commitCount + ' commit' + (commitCount === 1 ? '' : 's') + '</div>' +
+                    '<div style="color:var(--text-dim);margin-top:2px;">' + diffLine + '</div>' +
+                    '<div style="color:var(--text-dim);margin-top:4px;">Live memory is editable. Commits create a git history you can diff, audit, and restore.</div>' +
+                '</div>' +
+                '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">' +
+                    openBtn + diffBtn + refreshBtn +
+                '</div>' +
+            '</div>';
+    }
+
+    function handleBagGitInfo(msg) {
+        if (!msg || !msg.key) return;
+        _bagGitMeta[msg.key] = msg;
+        _renderBagGitInfo(msg.key);
+    }
+
+    function openBagSnapshotFile(key) {
+        if (!key) return;
+        var meta = _bagGitMeta[key] || {};
+        var entry = _bagDrillCache[key] || {};
+        vscode.postMessage({
+            command: 'openBagDocFile',
+            key: key,
+            itemType: entry.type || '',
+            filePath: meta.filePath || ''
+        });
+    }
+    window.openBagSnapshotFile = openBagSnapshotFile;
+
+    function viewBagSnapshotDiff(key) {
+        if (!key) return;
+        var safeKey = _safeBagKeyId(key);
+        var diffDiv = document.getElementById('bag-git-diff-' + safeKey);
+        if (diffDiv) {
+            diffDiv.style.display = 'block';
+            diffDiv.innerHTML = '<div style="color:var(--text-dim);padding:6px 0;">Loading diff...</div>';
+        }
+        var meta = _bagGitMeta[key] || {};
+        var entry = _bagDrillCache[key] || {};
+        vscode.postMessage({
+            command: 'bagGitDiff',
+            key: key,
+            itemType: entry.type || '',
+            filePath: meta.filePath || ''
+        });
+    }
+    window.viewBagSnapshotDiff = viewBagSnapshotDiff;
+
+    var _DIFF_TRUNCATE_CHARS = 5000;
+    function handleBagGitDiffResult(msg) {
+        if (!msg || !msg.key) return;
+        var safeKey = _safeBagKeyId(msg.key);
+        var diffDiv = document.getElementById('bag-git-diff-' + safeKey);
+        if (!diffDiv) return;
+        diffDiv.style.display = 'block';
+        if (msg.error) {
+            diffDiv.innerHTML = '<div style="color:#e11d48;padding:6px 0;">' + _esc(msg.error) + '</div>';
+            return;
+        }
+
+        var rawDiff = msg.diff || '';
+        var truncated = rawDiff.length > _DIFF_TRUNCATE_CHARS;
+        var displayDiff = truncated ? rawDiff.slice(0, _DIFF_TRUNCATE_CHARS) : rawDiff;
+        var keyJs = _esc(msg.key).replace(/'/g, "\\'");
+        var title = 'Diff ' + _esc(msg.fromSha || '?') + ' → ' + _esc(msg.toSha || '?');
+        var truncMsg = truncated
+            ? '<div style="color:#f59e0b;font-size:9px;margin-top:4px;">Diff truncated (' + rawDiff.length + ' chars). ' +
+              '<button onclick="openBagNativeDiff(\'' + keyJs + '\')" style="font-size:9px;padding:1px 6px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Open Full Diff in Editor</button></div>'
+            : '<div style="margin-top:4px;"><button onclick="openBagNativeDiff(\'' + keyJs + '\')" style="font-size:9px;padding:1px 6px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Open in Editor</button></div>';
+
+        diffDiv.innerHTML =
+            '<div style="padding:6px 8px;border:1px solid var(--border);background:var(--surface2);">' +
+                '<div style="font-size:10px;color:var(--text-dim);margin-bottom:6px;">' + title + '</div>' +
+                '<pre style="margin:0;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;color:var(--text);font-size:10px;line-height:1.45;">' + _esc(displayDiff) + (truncated ? '\n...' : '') + '</pre>' +
+                truncMsg +
+            '</div>';
+    }
+
+    function openBagNativeDiff(key) {
+        if (!key) return;
+        var meta = _bagGitMeta[key] || {};
+        var entry = _bagDrillCache[key] || {};
+        vscode.postMessage({
+            command: 'bagGitOpenNativeDiff',
+            key: key,
+            itemType: entry.type || '',
+            filePath: meta.filePath || ''
+        });
+    }
+    window.openBagNativeDiff = openBagNativeDiff;
+
+    function _objFromMaybeJson(input) {
+        if (input && typeof input === 'object' && !Array.isArray(input)) return input;
+        if (typeof input !== 'string') return null;
+        try {
+            var parsed = JSON.parse(input);
+            return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : null;
+        } catch (e) {
+            return null;
         }
     }
+
+    function _tagsFromAny(value) {
+        if (Array.isArray(value)) {
+            return value.map(function (t) { return String(t || '').trim(); }).filter(Boolean);
+        }
+        if (typeof value === 'string') {
+            return value.split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+        }
+        return [];
+    }
+
+    function _deriveComplexityFromNodeCount(nodeCount) {
+        if (nodeCount <= 3) return 'simple';
+        if (nodeCount <= 8) return 'moderate';
+        if (nodeCount <= 15) return 'complex';
+        return 'advanced';
+    }
+
+    function _deriveEstTimeFromNodeCount(nodeCount) {
+        if (nodeCount <= 2) return 'instant';
+        if (nodeCount <= 6) return 'fast';
+        if (nodeCount <= 12) return 'moderate';
+        if (nodeCount <= 24) return 'long';
+        return 'extended';
+    }
+
+    function _prepareMarketplacePrefillFromBag(entry) {
+        var key = String((entry && entry.key) || '');
+        var value = entry ? entry.value : null;
+        var source = _objFromMaybeJson(value) || {};
+        var sourceDocType = String(source.docType || source.sourceDocType || 'workflow').toLowerCase();
+        var category = String(
+            source.category ||
+            (source.meta && source.meta.marketplace && source.meta.marketplace.category) ||
+            'memory'
+        ).toLowerCase();
+        if (!MP_CATEGORIES[category]) category = 'other';
+
+        var fallbackRole = String(
+            source.workflowRole ||
+            source.role ||
+            (source.meta && source.meta.marketplace && source.meta.marketplace.workflow_role) ||
+            'automation'
+        ).toLowerCase();
+
+        var rawBody =
+            source.workflowDefinition ||
+            source.body ||
+            source.workflow ||
+            value;
+
+        var workflowDef = _normalizeWorkflowDefinition(rawBody, {
+            name: source.name || key,
+            description: source.description || ('Imported from FelixBag key: ' + key),
+            workflowRole: fallbackRole,
+            category: category,
+            sourceDocType: sourceDocType
+        });
+
+        var wrapped = false;
+        if (!workflowDef) {
+            var fallbackBody;
+            if (typeof value === 'string') {
+                fallbackBody = value;
+            } else {
+                try {
+                    fallbackBody = JSON.stringify(value || {}, null, 2);
+                } catch (e2) {
+                    fallbackBody = String(value || '');
+                }
+            }
+
+            workflowDef = _buildWrappedWorkflowDefinition({
+                name: source.name || key || 'FelixBag Item',
+                description: source.description || ('Auto-wrapped from FelixBag key: ' + key),
+                workflowRole: fallbackRole || 'knowledge',
+                sourceDocType: sourceDocType || 'workflow',
+                category: category || 'other',
+                body: fallbackBody
+            }, 'felixbag:' + key);
+            wrapped = true;
+        }
+
+        var tags = _tagsFromAny(source.tags);
+        var role = _detectWorkflowRole(sourceDocType, source, tags);
+        if (WORKFLOW_ROLE_ORDER.indexOf(role) === -1) role = 'automation';
+
+        var nodeCount = Array.isArray(workflowDef.nodes) ? workflowDef.nodes.length : 0;
+        var complexity = String(source.complexity || '').toLowerCase();
+        if (['simple', 'moderate', 'complex', 'advanced'].indexOf(complexity) === -1) {
+            complexity = _deriveComplexityFromNodeCount(nodeCount);
+        }
+        var estTime = String(source.estTime || source.estimatedTime || '').toLowerCase();
+        if (['instant', 'fast', 'moderate', 'long', 'extended'].indexOf(estTime) === -1) {
+            estTime = _deriveEstTimeFromNodeCount(nodeCount);
+        }
+
+        return {
+            role: role,
+            name: String(source.name || workflowDef.name || key),
+            description: String(source.description || workflowDef.description || ('Imported from FelixBag key: ' + key)),
+            body: JSON.stringify(workflowDef, null, 2),
+            tags: tags.join(', '),
+            category: category,
+            version: String(source.version || '1.0.0'),
+            complexity: complexity,
+            estTime: estTime,
+            wrapped: wrapped
+        };
+    }
+
+    function _setPublishModalField(id, value) {
+        var el = document.getElementById(id);
+        if (!el || typeof value === 'undefined' || value === null) return;
+        el.value = value;
+    }
+
+    function publishBagToMarketplace(btn) {
+        var key = btn.getAttribute('data-bag-key');
+        if (!key) return;
+
+        var entry = _bagDrillCache[key];
+        if (!entry) {
+            mpToast('Open the item first to load publish details.', 'error', 3200);
+            return;
+        }
+
+        var prefill = _prepareMarketplacePrefillFromBag(entry);
+
+        // Fix 1: Run safety scan on prefilled content before opening modal
+        var safetyResult = scanDocSafety({
+            name: prefill.name,
+            description: prefill.description,
+            body: prefill.body,
+            tags: prefill.tags ? prefill.tags.split(',').map(function(t){ return t.trim(); }) : []
+        });
+
+        if (safetyResult.trustLevel === 'blocked') {
+            mpToast('BLOCKED: Content contains critical safety flags (' +
+                safetyResult.flags.filter(function(f){ return f.severity === 'critical'; })
+                    .map(function(f){ return f.pattern; }).join(', ') +
+                '). Remove flagged content before publishing.', 'error', 8000);
+            return;
+        }
+
+        _setPublishModalField('pub-wf-role', prefill.role);
+        _setPublishModalField('pub-wf-name', prefill.name);
+        _setPublishModalField('pub-wf-desc', prefill.description);
+        _setPublishModalField('pub-wf-json', prefill.body);
+        _setPublishModalField('pub-wf-tags', prefill.tags);
+        _setPublishModalField('pub-wf-category', prefill.category);
+        _setPublishModalField('pub-wf-version', prefill.version);
+        _setPublishModalField('pub-wf-complexity', prefill.complexity);
+        _setPublishModalField('pub-wf-time', prefill.estTime);
+
+        var modal = document.getElementById('publish-wf-modal');
+        if (modal) modal.classList.add('active');
+
+        // Trigger live redaction preview on the body field
+        if (_privacySettings.autoRedact) {
+            vscode.postMessage({ command: 'nostrRedactPreview', text: prefill.body });
+        }
+
+        if (safetyResult.trustLevel === 'flagged') {
+            mpToast('WARNING: Safety scan flagged this content (score: ' + safetyResult.score +
+                '). Review flagged items: ' +
+                safetyResult.flags.map(function(f){ return f.pattern + ' in ' + f.location; }).join(', ') +
+                '. Auto-redaction is ' + (_privacySettings.autoRedact ? 'ON' : 'OFF') + '.',
+                'error', 8000);
+        } else if (prefill.wrapped) {
+            mpToast('This item was auto-wrapped into a workflow. Review fields before publishing.', 'info', 5200);
+        } else {
+            mpToast('Publish form prefilled from FelixBag item (safety: SAFE, score: ' + safetyResult.score + ')', 'success', 3000);
+        }
+    }
+    window.publishBagToMarketplace = publishBagToMarketplace;
 
     function _renderLineNumbered(text) {
         var lines = String(text).split('\n');
@@ -1941,21 +2333,36 @@
                         var contentStr = typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val || '');
                         var lineCount = contentStr.split('\n').length;
                         var verNum = got.version || 1;
-                        var showGist = _state && _state.gistPublishEnabled && _state.githubAuthenticated;
-                        var gistBtnHtml = '';
-                        if (showGist) {
-                            var gistBtnId = 'gist-btn-' + _openDrillKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-                            gistBtnHtml = '<button id="' + gistBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="publishBagToGist(this)" style="font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:var(--accent);border:1px solid var(--border);border-radius:3px;">Publish to Gist</button>';
-                        }
+                        _bagDrillCache[_openDrillKey] = {
+                            key: _openDrillKey,
+                            type: got.type || '',
+                            version: verNum,
+                            value: val,
+                            raw: got
+                        };
+
+                        var safeKey = _safeBagKeyId(_openDrillKey);
+                        var publishBtnId = 'publish-btn-' + safeKey;
+                        var commitBtnId = 'commit-btn-' + safeKey;
+                        var gitMetaId = 'bag-git-meta-' + safeKey;
+                        var gitDiffId = 'bag-git-diff-' + safeKey;
+                        var gitDisabled = (_gitProbed && !_gitAvailable);
+                        var commitBtnStyle = gitDisabled
+                            ? 'font-size:9px;padding:2px 8px;cursor:not-allowed;background:var(--surface2);color:var(--text-dim);opacity:0.45;border:1px solid var(--border);border-radius:3px;'
+                            : 'font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:var(--accent);border:1px solid var(--border);border-radius:3px;';
                         drillDiv.innerHTML =
                             '<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">' +
                                 '<span>' + lineCount + ' lines · ' + _fmtSize(contentStr.length) + ' · v' + verNum + '</span>' +
-                                gistBtnHtml +
+                                '<div style="display:flex;align-items:center;gap:6px;">' +
+                                    '<button id="' + publishBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="publishBagToMarketplace(this)" style="font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Publish to Marketplace</button>' +
+                                    '<button id="' + commitBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="commitBagVersion(this)"' + (gitDisabled ? ' disabled title="Git not available"' : '') + ' style="' + commitBtnStyle + '">Commit Version</button>' +
+                                '</div>' +
                             '</div>' +
+                            '<div id="' + gitMetaId + '" style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;color:var(--text-dim);">Loading git details...</div>' +
+                            '<div id="' + gitDiffId + '" style="display:none;padding:6px 12px;border-bottom:1px solid var(--border);"></div>' +
                             _renderLineNumbered(contentStr);
-                        if (showGist) {
-                            vscode.postMessage({ type: 'getBagGistMeta', key: _openDrillKey });
-                        }
+                        _renderBagGitInfo(_openDrillKey);
+                        if (!gitDisabled) requestBagGitInfo(_openDrillKey);
                     } catch (e) {
                         drillDiv.innerHTML = '<pre style="padding:8px 12px;color:var(--text);white-space:pre-wrap;font-size:11px;">' + _esc(text) + '</pre>';
                     }

@@ -56,7 +56,6 @@ All settings live under `champion.*` in VS Code Settings.
 | `champion.evaluation.enabled` | Enable model evaluation tracking |
 | `champion.ipfs.provider` | IPFS provider: `none`, `pinata`, `web3storage` |
 | `champion.ipfs.apiKey` | API key for IPFS provider |
-| `champion.memory.gistPublish` | Enable Gist publishing on memory items (default: off) |
 
 ## Commands
 
@@ -69,7 +68,7 @@ All settings live under `champion.*` in VS Code Settings.
 
 - **FelixBag auto-persistence** — Bag state survives process restarts. Auto-load on startup, atexit save, 5-minute background save.
 - **Cascade state persistence** — Chains and graphs backed by FelixBag. No more lost state on restart.
-- **FelixBag → Gist publishing** — Publish any memory item to a versioned GitHub Gist directly from the Memory tab. Cascade state included.
+- **Local git versioning** — Commit any FelixBag item to the workspace git repo from the Memory tab. Items saved as files in `bag_docs/` with full git history.
 - **Model loading stability** — 10-minute timeout for large model loads. SSE heartbeat suppressed during long operations.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.

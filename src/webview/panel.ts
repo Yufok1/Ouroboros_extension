@@ -6,6 +6,9 @@ import { ModelEvaluator } from '../evaluation';
 import { ReputationChain } from '../reputationChain';
 import { MarketplaceIndex } from '../marketplaceSearch';
 import { IPFSPinningService } from '../ipfsPinning';
+import * as fs from 'fs';
+import * as path from 'path';
+import { execFile } from 'child_process';
 
 type DiagnosticSource =
     | { kind: 'tool'; tool: string; args?: Record<string, any>; label?: string }
@@ -194,7 +197,6 @@ export class CouncilPanel {
         // (send() is a no-op when panel is null).
         const counts = this.mcp.getToolCounts();
         const categories = this.mcp.getEnabledCategories();
-        const gistPublishEnabled = vscode.workspace.getConfiguration('champion.memory').get<boolean>('gistPublish', false);
         this.send({
             type: 'state',
             serverStatus: this.mcp.status,
@@ -202,9 +204,7 @@ export class CouncilPanel {
             port: this.mcp.port,
             toolCounts: counts,
             categories,
-            activityLog: this.activityLog.slice(-50),
-            gistPublishEnabled,
-            githubAuthenticated: !!this.github?.isAuthenticated
+            activityLog: this.activityLog.slice(-50)
         });
 
         // Nostr identity — always push, even when nostr is unavailable.
@@ -841,61 +841,238 @@ export class CouncilPanel {
                 }
                 break;
             }
-            // ── FELIXBAG ↔ GIST BRIDGE ──
-            case 'publishBagToGist': {
-                if (!this.github) {
-                    this.send({ type: 'bagGistResult', error: 'GitHub not authenticated. Set a Personal Access Token in settings.' });
-                    break;
-                }
-                if (!msg.key) {
-                    this.send({ type: 'bagGistResult', error: 'No bag item key provided.' });
+            // ── FELIXBAG LOCAL GIT VERSIONING ──
+            case 'commitBagVersion': {
+                const key = String(msg.key || '');
+                if (!key) {
+                    this.send({ type: 'bagCommitResult', key, error: 'No bag item key provided.' });
                     break;
                 }
                 try {
-                    const bagResult = await this.callToolParsed('bag_get', { key: msg.key }, { suppressActivity: true, source: 'internal' });
+                    const wsFolder = this.getActiveWorkspaceFolder();
+                    if (!wsFolder) {
+                        this.send({ type: 'bagCommitResult', key, error: 'No workspace folder open.' });
+                        break;
+                    }
+                    const wsRoot = wsFolder.uri.fsPath;
+
+                    const bagResult = await this.callToolParsed('bag_get', { key }, { suppressActivity: true, source: 'internal' });
                     const value = bagResult?.value ?? bagResult;
                     const contentStr = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value || '');
-                    const itemType = bagResult?.type || msg.itemType || 'text';
-                    const displayName = msg.displayName || msg.key;
-                    const existingGistId = msg.gistId; // passed from UI if previously linked
+                    const itemType = String(bagResult?.type || msg.itemType || 'text').toLowerCase();
+                    const docPath = this.getBagDocPath(wsRoot, key, itemType, msg.filePath);
 
-                    const meta: Record<string, any> = {
-                        docType: itemType === 'json' ? 'workflow' : 'document',
-                        bodyFormat: itemType,
-                        category: 'felixbag',
-                        bagKey: msg.key
-                    };
+                    // Write file
+                    fs.mkdirSync(path.dirname(docPath.filePath), { recursive: true });
+                    fs.writeFileSync(docPath.filePath, contentStr, 'utf-8');
 
-                    let gist;
-                    if (existingGistId) {
-                        gist = await this.github.updateGist(existingGistId, displayName, contentStr, `FelixBag item: ${displayName}`, meta);
-                    } else {
-                        gist = await this.github.createGist(displayName, contentStr, `FelixBag item: ${displayName}`, msg.isPublic !== false, meta);
+                    await this.gitExec(wsRoot, ['add', docPath.relPath]);
+                    const status = await this.gitExec(wsRoot, ['status', '--porcelain', '--', docPath.relPath]);
+                    if (!status.trim()) {
+                        const gitInfo = await this.inspectBagGit(wsRoot, docPath.relPath);
+                        this.send({
+                            type: 'bagCommitResult',
+                            key,
+                            noChanges: true,
+                            filePath: docPath.relPath,
+                            commitCount: gitInfo.commitCount,
+                            latestWhen: gitInfo.latestWhen,
+                            latestSubject: gitInfo.latestSubject
+                        });
+                        break;
                     }
+                    await this.gitExec(wsRoot, ['commit', '-m', `bag: ${key}`, '--', docPath.relPath]);
+                    const sha = (await this.gitExec(wsRoot, ['rev-parse', '--short', 'HEAD'])).trim();
+                    const gitInfo = await this.inspectBagGit(wsRoot, docPath.relPath);
 
-                    // Store gist ID back in FelixBag metadata by re-inducting with gist_id marker
-                    const metaContent = JSON.stringify({ _gist_id: gist.id, _gist_url: gist.url, _gist_updated: new Date().toISOString(), _original: contentStr });
-                    await this.callToolParsed('bag_put', { key: msg.key + ':gist_meta', value: metaContent }, { suppressActivity: true, source: 'internal' });
-
-                    this.send({ type: 'bagGistResult', success: true, key: msg.key, gistId: gist.id, gistUrl: gist.url, updated: !!existingGistId });
+                    this.send({
+                        type: 'bagCommitResult',
+                        key,
+                        sha,
+                        filePath: docPath.relPath,
+                        commitCount: gitInfo.commitCount,
+                        latestWhen: gitInfo.latestWhen,
+                        latestSubject: gitInfo.latestSubject,
+                        diffStat: gitInfo.diffStat
+                    });
                 } catch (err: any) {
-                    this.send({ type: 'bagGistResult', error: 'Gist publish failed: ' + err.message });
+                    this.send({ type: 'bagCommitResult', key, error: 'Git commit failed: ' + err.message });
                 }
                 break;
             }
-            case 'getBagGistMeta': {
-                if (!msg.key) { break; }
+            case 'bagGitInspect': {
+                const key = String(msg.key || '');
+                if (!key) {
+                    this.send({ type: 'bagGitInfo', key, error: 'No bag item key provided.' });
+                    break;
+                }
                 try {
-                    const meta = await this.callToolParsed('bag_get', { key: msg.key + ':gist_meta' }, { suppressActivity: true, source: 'internal' });
-                    const val = meta?.value ?? meta;
-                    if (val && typeof val === 'string') {
-                        const parsed = JSON.parse(val);
-                        this.send({ type: 'bagGistMeta', key: msg.key, gistId: parsed._gist_id, gistUrl: parsed._gist_url });
-                    } else {
-                        this.send({ type: 'bagGistMeta', key: msg.key, gistId: null });
+                    const wsFolder = this.getActiveWorkspaceFolder();
+                    if (!wsFolder) {
+                        this.send({ type: 'bagGitInfo', key, error: 'No workspace folder open.' });
+                        break;
                     }
+                    const wsRoot = wsFolder.uri.fsPath;
+                    let itemType = String(msg.itemType || '').toLowerCase();
+                    if (!itemType) {
+                        try {
+                            const bagResult = await this.callToolParsed('bag_get', { key }, { suppressActivity: true, source: 'internal' });
+                            itemType = String(bagResult?.type || 'text').toLowerCase();
+                        } catch {
+                            itemType = 'text';
+                        }
+                    }
+
+                    const docPath = this.getBagDocPath(wsRoot, key, itemType, msg.filePath);
+                    const exists = fs.existsSync(docPath.filePath);
+                    const gitInfo = await this.inspectBagGit(wsRoot, docPath.relPath);
+
+                    this.send({
+                        type: 'bagGitInfo',
+                        key,
+                        itemType: docPath.itemType,
+                        filePath: docPath.relPath,
+                        exists,
+                        ...gitInfo
+                    });
+                } catch (err: any) {
+                    this.send({ type: 'bagGitInfo', key, error: 'Git inspect failed: ' + err.message });
+                }
+                break;
+            }
+            case 'bagGitDiff': {
+                const key = String(msg.key || '');
+                if (!key) {
+                    this.send({ type: 'bagGitDiffResult', key, error: 'No bag item key provided.' });
+                    break;
+                }
+                try {
+                    const wsFolder = this.getActiveWorkspaceFolder();
+                    if (!wsFolder) {
+                        this.send({ type: 'bagGitDiffResult', key, error: 'No workspace folder open.' });
+                        break;
+                    }
+                    const wsRoot = wsFolder.uri.fsPath;
+                    let itemType = String(msg.itemType || '').toLowerCase();
+                    if (!itemType) {
+                        try {
+                            const bagResult = await this.callToolParsed('bag_get', { key }, { suppressActivity: true, source: 'internal' });
+                            itemType = String(bagResult?.type || 'text').toLowerCase();
+                        } catch {
+                            itemType = 'text';
+                        }
+                    }
+
+                    const docPath = this.getBagDocPath(wsRoot, key, itemType, msg.filePath);
+                    const hashesRaw = (await this.gitExec(wsRoot, ['log', '-2', '--format=%H', '--', docPath.relPath])).trim();
+                    const hashes = hashesRaw ? hashesRaw.split(/\r?\n/).filter(Boolean) : [];
+                    if (hashes.length < 2) {
+                        this.send({
+                            type: 'bagGitDiffResult',
+                            key,
+                            filePath: docPath.relPath,
+                            error: 'Need at least two commits for this file to show a diff.'
+                        });
+                        break;
+                    }
+
+                    const diff = await this.gitExec(wsRoot, ['diff', hashes[1], hashes[0], '--', docPath.relPath]);
+                    this.send({
+                        type: 'bagGitDiffResult',
+                        key,
+                        filePath: docPath.relPath,
+                        fromSha: hashes[1].slice(0, 7),
+                        toSha: hashes[0].slice(0, 7),
+                        diff: diff || '(No textual diff between the latest two snapshots for this file.)'
+                    });
+                } catch (err: any) {
+                    this.send({ type: 'bagGitDiffResult', key, error: 'Git diff failed: ' + err.message });
+                }
+                break;
+            }
+            case 'openBagDocFile': {
+                const key = String(msg.key || '');
+                if (!key && !msg.filePath) {
+                    this.send({ type: 'bagDocOpened', key, error: 'No bag key or file path provided.' });
+                    break;
+                }
+                try {
+                    const wsFolder = this.getActiveWorkspaceFolder();
+                    if (!wsFolder) {
+                        this.send({ type: 'bagDocOpened', key, error: 'No workspace folder open.' });
+                        break;
+                    }
+                    const wsRoot = wsFolder.uri.fsPath;
+                    let itemType = String(msg.itemType || '').toLowerCase();
+                    if (!itemType) {
+                        itemType = 'text';
+                    }
+
+                    const docPath = this.getBagDocPath(wsRoot, key || 'bag-item', itemType, msg.filePath);
+                    if (!fs.existsSync(docPath.filePath)) {
+                        this.send({ type: 'bagDocOpened', key, filePath: docPath.relPath, error: 'Snapshot file not found.' });
+                        break;
+                    }
+
+                    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(docPath.filePath));
+                    await vscode.window.showTextDocument(doc, { preview: false });
+                    this.send({ type: 'bagDocOpened', key, filePath: docPath.relPath });
+                } catch (err: any) {
+                    this.send({ type: 'bagDocOpened', key, error: 'Open file failed: ' + err.message });
+                }
+                break;
+            }
+            // ── GIT AVAILABILITY PROBE ──
+            case 'checkGitAvailable': {
+                try {
+                    await this.gitExec(
+                        this.getActiveWorkspaceFolder()?.uri.fsPath || '.',
+                        ['--version']
+                    );
+                    this.send({ type: 'gitAvailability', available: true });
                 } catch {
-                    this.send({ type: 'bagGistMeta', key: msg.key, gistId: null });
+                    this.send({ type: 'gitAvailability', available: false });
+                }
+                break;
+            }
+            // ── NATIVE DIFF VIEWER ──
+            case 'bagGitOpenNativeDiff': {
+                const key = String(msg.key || '');
+                try {
+                    const wsFolder = this.getActiveWorkspaceFolder();
+                    if (!wsFolder) {
+                        this.send({ type: 'bagDocOpened', key, error: 'No workspace folder open.' });
+                        break;
+                    }
+                    const wsRoot = wsFolder.uri.fsPath;
+                    let itemType = String(msg.itemType || '').toLowerCase();
+                    if (!itemType) { itemType = 'text'; }
+                    const docPath = this.getBagDocPath(wsRoot, key || 'bag-item', itemType, msg.filePath);
+                    const hashesRaw = (await this.gitExec(wsRoot, ['log', '-2', '--format=%H', '--', docPath.relPath])).trim();
+                    const hashes = hashesRaw ? hashesRaw.split(/\r?\n/).filter(Boolean) : [];
+                    if (hashes.length < 2) {
+                        this.send({ type: 'bagDocOpened', key, error: 'Need at least two commits.' });
+                        break;
+                    }
+                    const oldContent = await this.gitExec(wsRoot, ['show', hashes[1] + ':' + docPath.relPath]);
+                    const newContent = await this.gitExec(wsRoot, ['show', hashes[0] + ':' + docPath.relPath]);
+                    const oldUri = vscode.Uri.parse('untitled:' + docPath.relPath + ' (' + hashes[1].slice(0, 7) + ')');
+                    const newUri = vscode.Uri.parse('untitled:' + docPath.relPath + ' (' + hashes[0].slice(0, 7) + ')');
+                    // Write temp content via virtual docs
+                    const tmpDir = path.join(wsRoot, '.bag_tmp');
+                    fs.mkdirSync(tmpDir, { recursive: true });
+                    const oldFile = path.join(tmpDir, 'old_' + path.basename(docPath.filePath));
+                    const newFile = path.join(tmpDir, 'new_' + path.basename(docPath.filePath));
+                    fs.writeFileSync(oldFile, oldContent, 'utf-8');
+                    fs.writeFileSync(newFile, newContent, 'utf-8');
+                    await vscode.commands.executeCommand('vscode.diff',
+                        vscode.Uri.file(oldFile),
+                        vscode.Uri.file(newFile),
+                        `${key} (${hashes[1].slice(0, 7)} → ${hashes[0].slice(0, 7)})`
+                    );
+                    this.send({ type: 'bagDocOpened', key, filePath: docPath.relPath });
+                } catch (err: any) {
+                    this.send({ type: 'bagDocOpened', key, error: 'Open diff failed: ' + err.message });
                 }
                 break;
             }
@@ -1190,6 +1367,145 @@ export class CouncilPanel {
             }
         }
         return vscode.workspace.workspaceFolders?.[0];
+    }
+
+    private isPathInside(rootPath: string, targetPath: string): boolean {
+        const rootNorm = path.resolve(rootPath).replace(/\\/g, '/').toLowerCase();
+        const targetNorm = path.resolve(targetPath).replace(/\\/g, '/').toLowerCase();
+        return targetNorm === rootNorm || targetNorm.startsWith(rootNorm + '/');
+    }
+
+    private getBagDocPath(
+        wsRoot: string,
+        key: string,
+        itemType: string,
+        relPathOverride?: string
+    ): { itemType: string; filePath: string; relPath: string } {
+        const normalizedType = String(itemType || 'text').toLowerCase();
+
+        if (relPathOverride) {
+            const relPath = String(relPathOverride).replace(/\\/g, '/').replace(/^\.?\//, '');
+            const filePath = path.resolve(wsRoot, relPath);
+            if (!this.isPathInside(wsRoot, filePath)) {
+                throw new Error('Invalid bag doc path.');
+            }
+            return { itemType: normalizedType, filePath, relPath };
+        }
+
+        const safeName = key.replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 200);
+        const ext = ({
+            'json': '.json',
+            'config': '.json',
+            'state': '.json',
+            'workflow': '.json',
+            'code': '.py',
+            'document': '.md',
+            'markdown': '.md'
+        } as Record<string, string>)[normalizedType] || '.txt';
+        const subdir = normalizedType || 'misc';
+        const filePath = path.join(wsRoot, 'bag_docs', subdir, safeName + ext);
+        const relPath = path.relative(wsRoot, filePath).replace(/\\/g, '/');
+        return { itemType: normalizedType, filePath, relPath };
+    }
+
+    private gitExec(wsRoot: string, args: string[]): Promise<string> {
+        return new Promise((resolve, reject) => {
+            execFile('git', args, { cwd: wsRoot, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+                if (err) {
+                    reject(new Error((stderr || err.message || '').trim()));
+                    return;
+                }
+                resolve(String(stdout || ''));
+            });
+        });
+    }
+
+    private async inspectBagGit(
+        wsRoot: string,
+        relPath: string
+    ): Promise<{
+        tracked: boolean;
+        commitCount: number;
+        headSha: string;
+        previousSha: string;
+        latestSubject: string;
+        latestWhen: string;
+        branch: string;
+        dirty: boolean;
+        diffStat: string;
+        recent: Array<{ sha: string; when: string; subject: string }>;
+    }> {
+        const info = {
+            tracked: false,
+            commitCount: 0,
+            headSha: '',
+            previousSha: '',
+            latestSubject: '',
+            latestWhen: '',
+            branch: '',
+            dirty: false,
+            diffStat: '',
+            recent: [] as Array<{ sha: string; when: string; subject: string }>
+        };
+
+        try {
+            info.branch = (await this.gitExec(wsRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+        } catch { /* ignore branch errors */ }
+
+        try {
+            const statusRaw = (await this.gitExec(wsRoot, ['status', '--porcelain', '--', relPath])).trim();
+            info.dirty = !!statusRaw;
+        } catch { /* ignore status errors */ }
+
+        try {
+            const countRaw = (await this.gitExec(wsRoot, ['rev-list', '--count', 'HEAD', '--', relPath])).trim();
+            info.commitCount = Number.parseInt(countRaw, 10) || 0;
+            info.tracked = info.commitCount > 0;
+        } catch {
+            info.commitCount = 0;
+            info.tracked = false;
+            return info;
+        }
+
+        if (!info.tracked) {
+            return info;
+        }
+
+        try {
+            const recentRaw = (await this.gitExec(wsRoot, ['log', '-5', '--format=%h|%ci|%s', '--', relPath])).trim();
+            if (recentRaw) {
+                info.recent = recentRaw
+                    .split(/\r?\n/)
+                    .filter(Boolean)
+                    .map((line) => {
+                        const parts = line.split('|');
+                        const sha = String(parts.shift() || '').trim();
+                        const when = String(parts.shift() || '').trim();
+                        const subject = parts.join('|').trim();
+                        return { sha, when, subject };
+                    })
+                    .filter((row) => !!row.sha);
+
+                if (info.recent[0]) {
+                    info.headSha = info.recent[0].sha;
+                    info.latestWhen = info.recent[0].when;
+                    info.latestSubject = info.recent[0].subject;
+                }
+                if (info.recent[1]) {
+                    info.previousSha = info.recent[1].sha;
+                }
+            }
+        } catch { /* ignore log errors */ }
+
+        try {
+            const hashesRaw = (await this.gitExec(wsRoot, ['log', '-2', '--format=%H', '--', relPath])).trim();
+            const hashes = hashesRaw ? hashesRaw.split(/\r?\n/).filter(Boolean) : [];
+            if (hashes.length >= 2) {
+                info.diffStat = (await this.gitExec(wsRoot, ['diff', '--shortstat', hashes[1], hashes[0], '--', relPath])).trim();
+            }
+        } catch { /* ignore diff stat errors */ }
+
+        return info;
     }
 
     private parseToolPayload(result: any): any {

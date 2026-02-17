@@ -1,0 +1,100 @@
+{
+  "id": "observer_loop",
+  "name": "The Observer Loop (Gemma Dissection)",
+  "nodes": [
+    {
+      "id": "stimulus",
+      "type": "input",
+      "description": "The abstract concept to probe"
+    },
+    {
+      "id": "grounding",
+      "type": "web_search",
+      "parameters": {
+        "query": "$stimulus.query",
+        "limit": 3
+      }
+    },
+    {
+      "id": "id_reaction",
+      "type": "tool",
+      "tool_name": "invoke_slot",
+      "parameters": {
+        "slot": 1,
+        "mode": "generate",
+        "text": "Context: $grounding.results
+
+Concept: $stimulus.query
+
+Explain this concept purely based on the context provided. Do not hallucinate."
+      }
+    },
+    {
+      "id": "superego_analysis",
+      "type": "tool",
+      "tool_name": "invoke_slot",
+      "parameters": {
+        "slot": 0,
+        "mode": "generate",
+        "text": "Analyze the following explanation for semantic drift or hallucination.
+
+Explanation: $id_reaction.output
+
+Ground Truth: $grounding.results
+
+Report the errors concisely."
+      }
+    },
+    {
+      "id": "measure_distortion",
+      "type": "tool",
+      "tool_name": "invoke_slot",
+      "parameters": {
+        "slot": 2,
+        "mode": "embed",
+        "text": "$id_reaction.output"
+      }
+    },
+    {
+      "id": "measure_truth",
+      "type": "tool",
+      "tool_name": "invoke_slot",
+      "parameters": {
+        "slot": 2,
+        "mode": "embed",
+        "text": "$superego_analysis.output"
+      }
+    },
+    {
+      "id": "serialize_observation",
+      "type": "tool",
+      "tool_name": "bag_induct",
+      "parameters": {
+        "key": "observation_$stimulus.query",
+        "content": "Stimulus: $stimulus.query
+Reaction: $id_reaction.output
+Analysis: $superego_analysis.output",
+        "item_type": "training_record"
+      }
+    },
+    {
+      "id": "output",
+      "type": "output",
+      "parameters": {
+        "analysis": "$superego_analysis.output",
+        "distortion_vector": "$measure_distortion.output"
+      }
+    }
+  ],
+  "connections": [
+    {"from": "stimulus", "to": "grounding"},
+    {"from": "grounding", "to": "id_reaction"},
+    {"from": "stimulus", "to": "id_reaction"},
+    {"from": "id_reaction", "to": "superego_analysis"},
+    {"from": "grounding", "to": "superego_analysis"},
+    {"from": "id_reaction", "to": "measure_distortion"},
+    {"from": "superego_analysis", "to": "measure_truth"},
+    {"from": "superego_analysis", "to": "serialize_observation"},
+    {"from": "superego_analysis", "to": "output"}
+  ]
+}

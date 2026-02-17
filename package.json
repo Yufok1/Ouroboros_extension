@@ -338,12 +338,6 @@
           "default": "",
           "description": "Custom IPFS gateway URL (leave empty for provider default)",
           "order": 57
-        },
-        "champion.memory.gistPublish": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable 'Publish to Gist' on FelixBag memory items. Requires GitHub authentication. When disabled, only local versioning is available.",
-          "order": 60
         }
       }
     }
