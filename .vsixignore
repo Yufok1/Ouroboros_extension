@@ -19,3 +19,8 @@ scripts/**
 Gemini_Generated_Image_*
 *.vsix
 .vsixignore
+SITREP.md
+Nostr Apps Hub Interactivity.md
+observer_loop.json
+bag_docs/**
+.bag_tmp/**

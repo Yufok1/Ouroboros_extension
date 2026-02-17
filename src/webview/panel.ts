@@ -98,6 +98,10 @@ export class CouncilPanel {
                 this.send({ type: 'nostrRoomPresence', presence });
             });
 
+            this.nostr.onRelayAuth(({ relayUrl, success }) => {
+                this.send({ type: 'nostrRelayAuth', relayUrl, success });
+            });
+
             // Push identity update instantly whenever a relay connects or disconnects.
             this.nostr.onRelayChange(() => {
                 this.send({
@@ -116,6 +120,9 @@ export class CouncilPanel {
             this.nostr.fetchDMs();
             this.nostr.fetchPresence();
             this.nostr.fetchVoiceRooms();
+            this.nostr.fetchBadges();
+            this.nostr.fetchExternalIdentities();
+            this.nostr.fetchDvmResults();
         }
 
         // Forward GitHub auth changes
@@ -856,6 +863,17 @@ export class CouncilPanel {
             }
             case 'setMicSensitivity': {
                 if (typeof msg.value === 'number') setMicSensitivity(msg.value);
+                break;
+            }
+            case 'nostrSendVoiceNote': {
+                if (this.nostr && msg.audioUrl && msg.durationSecs) {
+                    try {
+                        const ev = await this.nostr.sendVoiceNote(msg.audioUrl, msg.durationSecs, msg.mimeType || 'audio/webm');
+                        this.send({ type: 'nostrVoiceNoteSent', eventId: ev.id });
+                    } catch (err: any) {
+                        this.send({ type: 'nostrError', error: err.message });
+                    }
+                }
                 break;
             }
             case 'setMicNoiseGate': {
@@ -4430,6 +4448,39 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 .voice-chat-input-row .chat-input { flex: 1; }
 .btn-danger { background: #5a1a1a !important; color: #f44336 !important; }
 .btn-danger:hover { background: #7a2a2a !important; }
+
+/* ── POLLS ── */
+.poll-card { border:1px solid var(--border); padding:10px; margin:6px 0; background:var(--surface); }
+.poll-question { font-size:11px; font-weight:600; margin-bottom:8px; color:var(--text); }
+.poll-option { padding:6px 8px; margin:3px 0; border:1px solid var(--border); cursor:pointer; font-size:10px; position:relative; overflow:hidden; }
+.poll-option:hover { border-color:var(--accent); }
+.poll-option.poll-results { cursor:default; }
+.poll-bar { position:absolute; left:0; top:0; height:100%; background:var(--accent); opacity:0.15; }
+.poll-label { position:relative; z-index:1; }
+.poll-pct { position:relative; z-index:1; float:right; font-size:9px; color:var(--text-dim); }
+.poll-meta { font-size:8px; color:var(--text-dim); margin-top:6px; }
+
+/* ── VOICE NOTES ── */
+.voice-note-msg { border-left: 3px solid var(--accent); }
+.voice-note-player { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 6px; background: var(--surface); border: 1px solid var(--border); }
+.voice-play-btn { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; }
+.voice-waveform { flex: 1; height: 16px; background: var(--border); position: relative; }
+.voice-duration { font-size: 9px; color: var(--text-dim); min-width: 30px; }
+.recording-dot { width: 8px; height: 8px; background: var(--red); border-radius: 50%; display: inline-block; animation: pulse 1s infinite; }
+
+/* ── BADGES ── */
+.badge-gallery { display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:8px; padding:12px; }
+.badge-card { border:1px solid var(--border); padding:10px; text-align:center; background:var(--surface); }
+.badge-name { font-size:10px; font-weight:bold; margin-top:6px; }
+.badge-desc { font-size:8px; color:var(--text-dim); margin-top:4px; }
+.badge-creator { font-size:8px; color:var(--text-dim); margin-top:2px; }
+.badge-icon-placeholder { font-size:32px; }
+.identity-badge { font-size:10px; margin-left:2px; cursor:help; }
+
+/* ── DVM / JOBS ── */
+.dvm-job-list { padding: 12px; }
+.dvm-job-card { border: 1px solid var(--border); padding: 10px; margin-bottom: 8px; background: var(--surface); }
+.dvm-result { margin-top: 8px; padding: 8px; background: var(--surface2); border: 1px solid var(--border); font-size: 10px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -4742,6 +4793,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     </div>
     <div class="online-bar" id="online-bar">
         <span class="online-dot"></span> <span id="online-count">0</span> online
+        <span id="relay-auth-status" style="font-size:8px;color:var(--text-dim);margin-left:auto;" title="NIP-42 relay authentication"></span>
     </div>
     <!-- SUB-TAB NAVIGATION -->
     <div class="community-toolbar" id="community-tabs">
@@ -4749,6 +4801,8 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <button data-ctab="dms">DMs</button>
         <button data-ctab="marketplace">MARKETPLACE</button>
         <button data-ctab="voice">VOICE</button>
+        <button data-ctab="badges">BADGES</button>
+        <button data-ctab="jobs">AI JOBS</button>
         <button data-ctab="privacy">PRIVACY</button>
         <button data-ctab="appearance">UX</button>
     </div>
@@ -4768,7 +4822,38 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
             <div class="redact-warn" id="chat-redact-warn">Sensitive data detected and will be auto-redacted before sending.</div>
             <div class="chat-input-row">
                 <input id="nostr-chat-input" placeholder="Type a message..." />
+                <button class="btn-dim" id="poll-toggle-btn" title="Create Poll" style="font-size:12px;">📊</button>
+                <button class="btn-dim" id="voice-note-btn" title="Record Voice Note" style="font-size:12px;">🎤</button>
                 <button id="nostr-chat-send">SEND</button>
+            </div>
+            <!-- Poll creation form -->
+            <div id="poll-create-form" style="display:none;border:1px solid var(--border);padding:10px;margin:6px 8px;">
+                <div class="section-head" style="margin-top:0;">CREATE POLL</div>
+                <input id="poll-question" class="chat-input" placeholder="Poll question..." style="margin-bottom:6px;" />
+                <div id="poll-options-list">
+                    <input class="chat-input poll-option-input" placeholder="Option 1" style="margin-bottom:4px;" />
+                    <input class="chat-input poll-option-input" placeholder="Option 2" style="margin-bottom:4px;" />
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;margin-top:6px;">
+                    <button class="btn-dim" id="poll-add-option">+ OPTION</button>
+                    <select id="poll-expiry" style="font-size:9px;width:auto;">
+                        <option value="0">No expiry</option>
+                        <option value="3600">1 hour</option>
+                        <option value="86400">24 hours</option>
+                        <option value="604800">1 week</option>
+                    </select>
+                    <div style="flex:1;"></div>
+                    <button class="btn-dim" id="poll-cancel">CANCEL</button>
+                    <button id="poll-submit">POST POLL</button>
+                </div>
+            </div>
+            <!-- Voice recording indicator -->
+            <div id="voice-note-recorder" style="display:none;border:1px solid var(--accent);padding:8px;margin:6px 8px;display:flex;align-items:center;gap:8px;">
+                <span class="recording-dot" id="voice-rec-dot"></span>
+                <span id="voice-rec-time" style="font-size:10px;font-family:var(--mono);">0:00</span>
+                <div style="flex:1;"></div>
+                <button class="btn-dim" id="voice-note-cancel">CANCEL</button>
+                <button id="voice-note-send">SEND NOTE</button>
             </div>
         </div>
     </div>
@@ -4997,6 +5082,104 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
                     <input type="text" id="voice-chat-input" class="chat-input" placeholder="Type a message..." />
                     <button class="btn-dim" id="voice-chat-send">SEND</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── BADGES SUB-TAB ── -->
+    <div class="community-subtab" id="ctab-badges" style="display:none;">
+        <div class="community-panel" style="min-height:350px;">
+            <div class="community-panel-header">
+                <span>BADGE GALLERY</span>
+                <button class="btn-dim" id="badge-create-toggle">+ CREATE BADGE</button>
+            </div>
+            <!-- Badge creation form -->
+            <div id="badge-create-form" style="display:none;padding:12px;border-bottom:1px solid var(--border);">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div class="field">
+                        <label style="font-size:9px;">Badge ID (slug)</label>
+                        <input id="badge-id" class="chat-input" placeholder="e.g. code-wizard" />
+                    </div>
+                    <div class="field">
+                        <label style="font-size:9px;">Badge Name</label>
+                        <input id="badge-name" class="chat-input" placeholder="Code Wizard" />
+                    </div>
+                </div>
+                <div class="field">
+                    <label style="font-size:9px;">Description</label>
+                    <input id="badge-description" class="chat-input" placeholder="Awarded for exceptional code contributions" />
+                </div>
+                <div class="field">
+                    <label style="font-size:9px;">Image URL (optional)</label>
+                    <input id="badge-image" class="chat-input" placeholder="https://..." />
+                </div>
+                <div style="display:flex;gap:6px;">
+                    <button id="badge-create-submit">CREATE BADGE</button>
+                    <button class="btn-dim" id="badge-create-cancel">CANCEL</button>
+                </div>
+            </div>
+            <!-- Badge award form -->
+            <div id="badge-award-form" style="display:none;padding:12px;border-bottom:1px solid var(--border);">
+                <div class="section-head" style="margin-top:0;">AWARD BADGE</div>
+                <div class="field">
+                    <label style="font-size:9px;">Badge to Award</label>
+                    <select id="badge-award-select" style="font-size:9px;"></select>
+                </div>
+                <div class="field">
+                    <label style="font-size:9px;">Recipient pubkeys (one per line)</label>
+                    <textarea id="badge-award-pubkeys" rows="3" style="font-size:9px;font-family:var(--mono);width:100%;resize:vertical;"></textarea>
+                </div>
+                <div style="display:flex;gap:6px;">
+                    <button id="badge-award-submit">AWARD</button>
+                    <button class="btn-dim" id="badge-award-cancel">CANCEL</button>
+                </div>
+            </div>
+            <!-- Badge gallery grid -->
+            <div class="badge-gallery" id="badge-gallery">
+                <div style="color:var(--text-dim);text-align:center;padding:20px;font-size:10px;">No badges found.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── AI JOBS SUB-TAB ── -->
+    <div class="community-subtab" id="ctab-jobs" style="display:none;">
+        <div class="community-panel" style="min-height:350px;">
+            <div class="community-panel-header">
+                <span>AI JOBS (NIP-90 DVM)</span>
+            </div>
+            <!-- Job submission form -->
+            <div style="padding:12px;border-bottom:1px solid var(--border);">
+                <div class="section-head" style="margin-top:0;">SUBMIT JOB</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div class="field">
+                        <label style="font-size:9px;">Job Type</label>
+                        <select id="dvm-job-kind" style="font-size:9px;">
+                            <option value="100">Text Generation</option>
+                            <option value="200">Code Generation</option>
+                            <option value="300">Translation</option>
+                            <option value="400">Summarization</option>
+                            <option value="500">Image Generation</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label style="font-size:9px;">Bid (sats, optional)</label>
+                        <input id="dvm-bid" class="chat-input" type="number" placeholder="0" />
+                    </div>
+                </div>
+                <div class="field">
+                    <label style="font-size:9px;">Input</label>
+                    <textarea id="dvm-input" rows="4" style="font-size:10px;width:100%;resize:vertical;font-family:var(--mono);" placeholder="Enter your prompt or text..."></textarea>
+                </div>
+                <div class="field">
+                    <label style="font-size:9px;">Parameters (key=value, one per line, optional)</label>
+                    <textarea id="dvm-params" rows="2" style="font-size:9px;width:100%;resize:vertical;font-family:var(--mono);" placeholder="model=gpt-4&#10;language=en"></textarea>
+                </div>
+                <button id="dvm-submit">SUBMIT JOB</button>
+            </div>
+            <!-- Active jobs list -->
+            <div class="section-head" style="margin-top:8px;padding:0 12px;">ACTIVE JOBS</div>
+            <div class="dvm-job-list" id="dvm-job-list">
+                <div style="color:var(--text-dim);text-align:center;padding:20px;font-size:10px;">No jobs submitted yet.</div>
             </div>
         </div>
     </div>
@@ -5306,6 +5489,29 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <div class="section-head" style="margin-top:16px;">BLOCKED USERS</div>
         <div class="block-list" id="block-list">
             <div style="color:var(--text-dim);text-align:center;padding:8px;font-size:10px;">No blocked users</div>
+        </div>
+        <div class="section-head" style="margin-top:16px;">EXTERNAL IDENTITY CLAIMS (NIP-39)</div>
+        <div style="border:1px solid var(--border);padding:12px;">
+            <div style="font-size:9px;color:var(--text-dim);margin-bottom:8px;">Link external accounts to your Nostr identity. Claims are published as kind 10011 events.</div>
+            <div id="identity-claims-list" style="margin-bottom:12px;">
+                <!-- Populated dynamically -->
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;">
+                <select id="identity-platform" style="font-size:9px;width:auto;">
+                    <option value="github">GitHub</option>
+                    <option value="twitter">Twitter/X</option>
+                    <option value="mastodon">Mastodon</option>
+                    <option value="discord">Discord</option>
+                    <option value="telegram">Telegram</option>
+                </select>
+                <input id="identity-username" class="chat-input" placeholder="username" style="flex:1;" />
+                <input id="identity-proof" class="chat-input" placeholder="proof URL (gist, tweet...)" style="flex:1;" />
+                <button class="btn-dim" id="identity-add-claim">ADD</button>
+            </div>
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;">
+                <button id="identity-publish" class="btn-dim">PUBLISH CLAIMS</button>
+                <span id="identity-status" style="font-size:8px;color:var(--text-dim);"></span>
+            </div>
         </div>
         <div class="section-head" style="margin-top:16px;">LIGHTNING ADDRESS (RECEIVE ZAPS)</div>
         <div style="border:1px solid var(--border);padding:12px;">

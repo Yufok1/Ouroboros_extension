@@ -116,16 +116,14 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.0
+## What's New in 0.7.2
 
-- **P2P Voice Rooms** — Full NIP-53 voice rooms with PeerJS/WebRTC transport. Create rooms, join via Nostr relay discovery, real-time mic feedback with level bars, speaking detection, live chat. No server hosting required.
-- **Communications Settings** — Mic sensitivity, noise gate, standalone mic test in Privacy tab.
-- **12 New NIP Methods** — NIP-39 external identities, NIP-42 relay auth, NIP-58 badges, NIP-88 polls, NIP-90 Data Vending Machines, NIP-A0 voice messages, WebRTC signaling.
-- **Theme Import** — Simple hex color theme customization in Privacy tab.
-- **FelixBag auto-persistence** — Bag state survives process restarts. Auto-load on startup, atexit save, 5-minute background save.
-- **Cascade state persistence** — Chains and graphs backed by FelixBag. No more lost state on restart.
-- **Local git versioning** — Commit any FelixBag item to the workspace git repo from the Memory tab.
-- **Model loading stability** — 10-minute timeout for large model loads. SSE heartbeat suppressed during long operations.
+- **NIP Expansion** — Full UI support for NIP-88 Polls, NIP-A0 Voice Messages (IPFS-backed), NIP-58 Badges, NIP-90 Data Vending Machines (AI Jobs), and NIP-39 External Identity Claims.
+- **Improved Community Chat** — Inline rendering for polls, voice notes, and identity badges.
+- **Relay Auth** — Support for NIP-42 AUTH challenges with private relays.
+- **P2P Voice Rooms** — Real-time NIP-53 voice communication with PeerJS/WebRTC transport.
+- **FelixBag auto-persistence** — Semantic memory survives restarts with auto-load and periodic background saves.
+- **Local git versioning** — Version control for individual memory items directly from the UI.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

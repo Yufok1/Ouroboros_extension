@@ -468,6 +468,8 @@ export class NostrService {
     public readonly onLiveChat = this._onLiveChat.event;
     private _onRoomPresence = new vscode.EventEmitter<RoomPresence>();
     public readonly onRoomPresence = this._onRoomPresence.event;
+    private _onRelayAuth = new vscode.EventEmitter<{ relayUrl: string; success: boolean }>();
+    public readonly onRelayAuth = this._onRelayAuth.event;
     private voiceRooms: Map<string, VoiceRoom> = new Map(); // aTag -> VoiceRoom
     private static readonly MAX_VOICE_ROOMS = 100;
 
@@ -790,8 +792,15 @@ export class NostrService {
             ws.on('message', (data: WebSocket.Data) => {
                 try {
                     const msg = JSON.parse(data.toString());
-                    if (msg[0] === 'EVENT' && msg[2]) {
-                        const event = msg[2] as NostrEvent;
+                                            if (msg[0] === 'AUTH') {
+                                                this.handleRelayAuth(url, msg[1]);
+                                                return;
+                                            }
+                                            if (msg[0] === 'OK') {
+                                                this._onRelayAuth.fire({ relayUrl: url, success: msg[2] });
+                                                return;
+                                            }
+                                            if (msg[0] === 'EVENT' && msg[2]) {                        const event = msg[2] as NostrEvent;
                         // Block filter — drop events from blocked users
                         if (this.blockedUsers.has(event.pubkey)) { return; }
                         // Cache profile metadata
@@ -1540,8 +1549,8 @@ export class NostrService {
         }
 
         const filter: NostrFilter = {
-            kinds: [CHAT_KIND, REACTION_KIND],
-            '#t': ['ouroboros-chat'],
+            kinds: [CHAT_KIND, REACTION_KIND, POLL_KIND, POLL_RESPONSE_KIND, VOICE_NOTE_KIND],
+            '#t': ['ouroboros', 'ouroboros-chat', 'ouroboros-poll'],
             limit: 100,
             ...(since ? { since } : {})
         };
@@ -1549,6 +1558,33 @@ export class NostrService {
         this.chatSubId = this.subscribe(filter, (_event) => {
             // Event handled by global onEvent emitter
         });
+    }
+
+    fetchBadges(): void {
+        const filter: NostrFilter = {
+            kinds: [BADGE_DEFINITION_KIND, BADGE_AWARD_KIND],
+            '#t': ['ouroboros'],
+            limit: 50
+        };
+        this.subscribe(filter, (_event) => {});
+    }
+
+    fetchExternalIdentities(): void {
+        const filter: NostrFilter = {
+            kinds: [EXTERNAL_IDENTITY_KIND],
+            '#t': ['ouroboros'],
+            limit: 50
+        };
+        this.subscribe(filter, (_event) => {});
+    }
+
+    fetchDvmResults(): void {
+        const filter: NostrFilter = {
+            kinds: [6000, 6001, 6002, 6003, 6004, 6005, DVM_JOB_FEEDBACK],
+            '#p': [this.publicKey],
+            limit: 50
+        };
+        this.subscribe(filter, (_event) => {});
     }
 
     // ── NIP-53: VOICE ROOMS & LIVE ACTIVITIES ──

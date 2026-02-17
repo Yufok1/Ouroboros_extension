@@ -2,6 +2,17 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.7.2] - 2026-02-17
+
+### Missing NIP UI Expansion
+- **Added**: NIP-88 Polls — create and vote on polls directly in the community chat.
+- **Added**: NIP-A0 Voice Messages — record and send public voice notes with IPFS-backed storage.
+- **Added**: NIP-58 Badges — create badge definitions, award badges to other users, and view badge galleries.
+- **Added**: NIP-90 Data Vending Machines — submit AI jobs (text, code, translation, etc.) and track results via the new AI JOBS tab.
+- **Added**: NIP-39 External Identity — link and verify GitHub, Twitter, Discord, and other identities in the Privacy tab.
+- **Added**: NIP-42 Relay Authentication — status indicator for successful AUTH challenges with private relays.
+- **Updated**: Community Chat now interleaves polls, voice notes, and identity badges with regular messages.
+
 ## [0.7.1] - 2026-02-17
 
 ### Voice Audio Streaming Fix

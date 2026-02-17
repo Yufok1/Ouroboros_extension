@@ -27,6 +27,29 @@
     let _wfColorCache = {};     // workflowId -> '#rrggbb'
     let _wfColorIndex = 0;
 
+    // ── NIP-88: POLL STATE ──
+    var _polls = {}; // pollId -> { question, options, votes, voted, expired }
+    var _pollVotes = {}; // pollId -> { optionIndex -> count }
+
+    // ── NIP-58: BADGE STATE ──
+    var _badges = {}; // badgeATag -> { id, name, description, image, creator }
+    var _badgeAwards = {}; // pubkey -> [badgeATag, ...]
+    var _myBadges = []; // badges awarded to _nostrPubkey
+
+    // ── NIP-90: DVM STATE ──
+    var _dvmJobs = {}; // eventId -> { kind, input, status, result, created_at }
+
+    // ── NIP-39: IDENTITY STATE ──
+    var _identityClaims = []; // { platform, identity, proof }
+    var _identityBadges = {}; // pubkey -> [{ platform, identity, proof }, ...]
+
+    // ── NIP-A0: VOICE NOTE STATE ──
+    var _voiceNoteRecording = false;
+    var _voiceNoteMediaRecorder = null;
+    var _voiceNoteChunks = [];
+    var _voiceNoteTimer = null;
+    var _voiceNoteStartTime = 0;
+
     // ── NIP-53: VOICE ROOM STATE ──
     let _voiceRooms = [];
     let _activeRoomATag = null;
@@ -599,6 +622,35 @@
                     break;
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
+                    break;
+                case 'nostrPollCreated':
+                    mpToast('Poll published', 'success', 2600);
+                    document.getElementById('poll-create-form').style.display = 'none';
+                    break;
+                case 'nostrBadgeCreated':
+                    mpToast('Badge created: ' + msg.id, 'success', 2600);
+                    document.getElementById('badge-create-form').style.display = 'none';
+                    break;
+                case 'nostrDvmJobSubmitted':
+                    if (msg.eventId) {
+                        _dvmJobs[msg.eventId] = { status: 'pending', input: document.getElementById('dvm-input').value, created_at: Date.now() };
+                        renderDvmJobs();
+                        mpToast('Job submitted', 'success', 2600);
+                        document.getElementById('dvm-input').value = '';
+                    }
+                    break;
+                case 'nostrIdentityPublished':
+                    mpToast('Identity claims published', 'success', 2600);
+                    break;
+                case 'nostrVoiceNoteSent':
+                    mpToast('Voice note sent', 'success', 2600);
+                    break;
+                case 'nostrRelayAuth':
+                    var statusEl = document.getElementById('relay-auth-status');
+                    if (statusEl) {
+                        statusEl.textContent = msg.success ? 'NIP-42 OK' : 'NIP-42 FAIL';
+                        statusEl.style.color = msg.success ? 'var(--green)' : 'var(--red)';
+                    }
                     break;
             }
         } catch (err) {
@@ -3397,6 +3449,97 @@
             _workflowEvents.push(event);
             _workflowEvents.sort(function (a, b) { return b.created_at - a.created_at; });
             renderWorkflowFeed();
+        } else if (event.kind === 1018) {
+            // NIP-88: Poll definition
+            if (!_polls[event.id]) {
+                _polls[event.id] = { 
+                    id: event.id,
+                    question: event.content,
+                    options: (event.tags || []).filter(t => t[0] === 'option').map(t => ({ index: parseInt(t[1]), label: t[2] })),
+                    expiresAt: (event.tags || []).find(t => t[0] === 'expiration') ? parseInt((event.tags || []).find(t => t[0] === 'expiration')[1]) : null
+                };
+                renderChatFeed();
+            }
+        } else if (event.kind === 1068) {
+            // NIP-88: Poll response/vote
+            var eTag = (event.tags || []).find(t => t[0] === 'e');
+            if (eTag) {
+                var pollId = eTag[1];
+                var responseTags = (event.tags || []).filter(t => t[0] === 'response');
+                if (!_pollVotes[pollId]) _pollVotes[pollId] = {};
+                responseTags.forEach(t => {
+                    var idx = parseInt(t[1]);
+                    _pollVotes[pollId][idx] = (_pollVotes[pollId][idx] || 0) + 1;
+                });
+                if (event.pubkey === _nostrPubkey) {
+                    if (!_polls[pollId]) _polls[pollId] = {};
+                    _polls[pollId].voted = true;
+                }
+                renderChatFeed();
+            }
+        } else if (event.kind === 30009) {
+            // NIP-58: Badge definition
+            var dTag = (event.tags || []).find(t => t[0] === 'd');
+            if (dTag) {
+                var badgeId = dTag[1];
+                var aTag = "30009:" + event.pubkey + ":" + badgeId;
+                _badges[aTag] = {
+                    id: badgeId,
+                    aTag: aTag,
+                    name: ((event.tags || []).find(t => t[0] === 'name') || [])[1] || badgeId,
+                    description: ((event.tags || []).find(t => t[0] === 'description') || [])[1] || '',
+                    image: ((event.tags || []).find(t => t[0] === 'image') || [])[1],
+                    creator: event.pubkey
+                };
+                renderBadgeGallery();
+            }
+        } else if (event.kind === 8) {
+            // NIP-58: Badge award
+            var aTag = ((event.tags || []).find(t => t[0] === 'a') || [])[1];
+            if (aTag) {
+                var pTags = (event.tags || []).filter(t => t[0] === 'p');
+                pTags.forEach(t => {
+                    var pubkey = t[1];
+                    if (!_badgeAwards[pubkey]) _badgeAwards[pubkey] = [];
+                    if (_badgeAwards[pubkey].indexOf(aTag) === -1) _badgeAwards[pubkey].push(aTag);
+                    if (pubkey === _nostrPubkey && _myBadges.indexOf(aTag) === -1) _myBadges.push(aTag);
+                });
+                renderBadgeGallery();
+                renderChatFeed();
+            }
+        } else if (event.kind === 1222) {
+            // NIP-A0: Voice note
+            if (_chatMessages.some(m => m.id === event.id)) return;
+            _chatMessages.push(event);
+            _chatMessages.sort((a, b) => a.created_at - b.created_at);
+            renderChatFeed();
+        } else if (event.kind === 10011) {
+            // NIP-39: External identity
+            var claims = (event.tags || []).filter(t => t[0] === 'i').map(t => {
+                var parts = (t[1] || '').split(':');
+                return { platform: parts[0], identity: parts[1], proof: t[2] };
+            });
+            _identityBadges[event.pubkey] = claims;
+            renderChatFeed();
+        } else if (event.kind >= 6000 && event.kind < 7000) {
+            // NIP-90: DVM Result
+            var eTag = (event.tags || []).find(t => t[0] === 'e');
+            if (eTag) {
+                var jobId = eTag[1];
+                if (_dvmJobs[jobId]) {
+                    _dvmJobs[jobId].status = 'completed';
+                    _dvmJobs[jobId].result = event.content;
+                    renderDvmJobs();
+                }
+            }
+        } else if (event.kind === 7000) {
+            // NIP-90: DVM Feedback
+            var eTag = (event.tags || []).find(t => t[0] === 'e');
+            var statusTag = (event.tags || []).find(t => t[0] === 'status');
+            if (eTag && statusTag && _dvmJobs[eTag[1]]) {
+                _dvmJobs[eTag[1]].status = statusTag[1];
+                renderDvmJobs();
+            }
         } else if (event.kind === 25050) {
             // WebRTC signaling event — extract peer ID for P2P voice
             // Skip our own events
@@ -3739,13 +3882,25 @@
         }
         var recent = _chatMessages.slice(-50);
         feed.innerHTML = recent.map(function (ev) {
+            if (ev.kind === 1018) return renderPollCard(ev);
+            if (ev.kind === 1222) return renderVoiceNote(ev);
+
             var ts = new Date(ev.created_at * 1000).toLocaleTimeString();
             var author = displayName(ev.pubkey);
             var isSelf = ev.pubkey === _nostrPubkey;
             var safeContent = safeHTML(ev.content);
+
+            // Add identity badges
+            var badges = _identityBadges[ev.pubkey] || [];
+            var badgeHtml = badges.map(function (b) {
+                var icons = { github: '🛠️', twitter: '🐦', discord: '🎮', mastodon: '🐘', telegram: '✈️' };
+                return '<span class="identity-badge" title="' + b.platform + ': ' + safeHTML(b.identity) + '">' + (icons[b.platform] || '✅') + '</span>';
+            }).join('');
+
             return '<div class="community-msg" data-msg-id="' + ev.id + '" data-msg-pubkey="' + ev.pubkey + '">' +
                 '<button class="msg-ctx-btn" data-ctx-msg="' + ev.id + '" data-ctx-pubkey="' + ev.pubkey + '" title="Message actions (DM, block, delete)">&#8943;</button>' +
                 '<span class="msg-author" style="' + (isSelf ? 'color:var(--accent);' : '') + '" data-user-pk="' + ev.pubkey + '">' + safeHTML(author) + '</span>' +
+                badgeHtml +
                 '<span class="msg-time">' + ts + '</span>' +
                 '<div class="msg-text">' + safeContent + '</div>' +
                 '<div class="msg-reactions">' +
@@ -3755,6 +3910,126 @@
                 '</div>';
         }).join('');
         feed.scrollTop = feed.scrollHeight;
+    }
+
+    // ── NIP-88: POLL RENDERING ──
+    function renderPollCard(ev) {
+        var poll = _polls[ev.id];
+        if (!poll) return '';
+        var question = safeHTML(poll.question);
+        var pollVotes = _pollVotes[ev.id] || {};
+        var totalVotes = 0;
+        Object.keys(pollVotes).forEach(function (k) { totalVotes += pollVotes[k]; });
+        var hasVoted = poll.voted;
+        var expired = poll.expiresAt ? (poll.expiresAt * 1000 < Date.now()) : false;
+
+        var html = '<div class="poll-card" data-poll-id="' + ev.id + '">';
+        html += '<div class="poll-question">' + question + '</div>';
+        poll.options.forEach(function (opt) {
+            var idx = opt.index;
+            var label = safeHTML(opt.label);
+            var count = pollVotes[idx] || 0;
+            var pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
+            var isResults = hasVoted || expired;
+            html += '<div class="poll-option' + (isResults ? ' poll-results' : '') + '" data-option="' + idx + '">';
+            if (isResults) {
+                html += '<div class="poll-bar" style="width:' + pct + '%;"></div>';
+                html += '<span class="poll-label">' + label + '</span>';
+                html += '<span class="poll-pct">' + pct + '% (' + count + ')</span>';
+            } else {
+                html += '<span class="poll-label">' + label + '</span>';
+            }
+            html += '</div>';
+        });
+        html += '<div class="poll-meta">' + totalVotes + ' votes';
+        if (expired) {
+            html += ' &middot; CLOSED';
+        } else if (poll.expiresAt) {
+            html += ' &middot; ends ' + new Date(poll.expiresAt * 1000).toLocaleString();
+        }
+        html += '</div></div>';
+        return html;
+    }
+
+    // ── NIP-A0: VOICE NOTE RENDERING ──
+    function renderVoiceNote(ev) {
+        var urlTag = (ev.tags || []).find(function (t) { return t[0] === 'url'; });
+        var durTag = (ev.tags || []).find(function (t) { return t[0] === 'duration'; });
+        var url = urlTag ? urlTag[1] : '';
+        var dur = durTag ? parseInt(durTag[1]) : 0;
+        var ts = new Date(ev.created_at * 1000).toLocaleTimeString();
+        var author = displayName(ev.pubkey);
+        var isSelf = ev.pubkey === _nostrPubkey;
+
+        return '<div class="community-msg voice-note-msg" data-msg-id="' + ev.id + '">' +
+            '<span class="msg-author" style="' + (isSelf ? 'color:var(--accent);' : '') + '">' + safeHTML(author) + '</span>' +
+            '<span class="msg-time">' + ts + '</span>' +
+            '<div class="voice-note-player">' +
+            '<button class="voice-play-btn" data-audio-url="' + url + '">&#9654;</button>' +
+            '<div class="voice-waveform"></div>' +
+            '<span class="voice-duration">' + Math.floor(dur / 60) + ':' + ('0' + (dur % 60)).slice(-2) + '</span>' +
+            '</div></div>';
+    }
+
+    // ── NIP-58: BADGE GALLERY RENDERING ──
+    function renderBadgeGallery() {
+        var el = document.getElementById('badge-gallery');
+        if (!el) return;
+        var keys = Object.keys(_badges);
+        if (keys.length === 0) {
+            el.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;font-size:10px;">No badges found.</div>';
+            return;
+        }
+        el.innerHTML = keys.map(function (key) {
+            var b = _badges[key];
+            var imgHtml = b.image ? '<img src="' + b.image + '" style="width:48px;height:48px;border-radius:4px;" />' : '<div class="badge-icon-placeholder">&#127942;</div>';
+            return '<div class="badge-card">' + imgHtml +
+                '<div class="badge-name">' + safeHTML(b.name) + '</div>' +
+                '<div class="badge-desc">' + safeHTML(b.description) + '</div>' +
+                '<div class="badge-creator">by ' + displayName(b.creator) + '</div>' +
+                '<button class="btn-dim badge-award-btn" data-badge-id="' + b.id + '" style="font-size:8px;margin-top:8px;">AWARD</button>' +
+                '</div>';
+        }).join('');
+    }
+
+    // ── NIP-90: DVM JOBS RENDERING ──
+    function renderDvmJobs() {
+        var el = document.getElementById('dvm-job-list');
+        if (!el) return;
+        var keys = Object.keys(_dvmJobs);
+        if (keys.length === 0) {
+            el.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;font-size:10px;">No jobs submitted yet.</div>';
+            return;
+        }
+        el.innerHTML = keys.reverse().map(function (id) {
+            var j = _dvmJobs[id];
+            var statusColor = j.status === 'completed' ? 'var(--green)' : j.status === 'error' ? 'var(--red)' : 'var(--amber)';
+            return '<div class="dvm-job-card">' +
+                '<div style="display:flex;justify-content:space-between;">' +
+                '<span style="font-size:9px;font-weight:bold;">Job ' + id.slice(0, 8) + '...</span>' +
+                '<span style="font-size:8px;color:' + statusColor + ';">' + (j.status || 'pending').toUpperCase() + '</span>' +
+                '</div>' +
+                '<div style="font-size:9px;color:var(--text-dim);margin-top:4px;">' + safeHTML((j.input || '').slice(0, 100)) + '</div>' +
+                (j.result ? '<div class="dvm-result">' + safeHTML(j.result) + '</div>' : '') +
+                '</div>';
+        }).join('');
+    }
+
+    // ── NIP-39: IDENTITY CLAIMS RENDERING ──
+    function renderIdentityClaims() {
+        var el = document.getElementById('identity-claims-list');
+        if (!el) return;
+        if (_identityClaims.length === 0) {
+            el.innerHTML = '<div style="color:var(--text-dim);font-size:9px;">No claims added yet</div>';
+            return;
+        }
+        el.innerHTML = _identityClaims.map(function (c, i) {
+            return '<div style="display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);">' +
+                '<span style="font-size:9px;font-weight:bold;min-width:60px;color:var(--accent);">' + safeHTML(c.platform) + '</span>' +
+                '<span style="font-size:9px;flex:1;">' + safeHTML(c.identity) + '</span>' +
+                '<button class="btn-dim identity-remove-btn" data-idx="' + i + '" style="font-size:8px;padding:1px 4px;">X</button>' +
+                '</div>';
+        }).join('');
     }
 
     // ── MARKETPLACE SAFETY SCANNER (lightweight mirror for ingest-time) ──
@@ -4569,6 +4844,31 @@
             return;
         }
         hideContextMenu();
+    });
+
+    // ── VOICE NOTE PLAYBACK ──
+    document.addEventListener('click', function (e) {
+        var playBtn = e.target.closest('.voice-play-btn');
+        if (playBtn) {
+            var url = playBtn.dataset.audioUrl;
+            if (!url) return;
+            
+            // Resolve ipfs:// URLs
+            if (url.startsWith('ipfs://')) {
+                url = 'https://ipfs.io/ipfs/' + url.slice(7);
+            }
+            
+            var audio = new Audio(url);
+            playBtn.textContent = '⌛';
+            audio.play().then(function() {
+                playBtn.textContent = '⏸';
+                audio.onended = function() { playBtn.textContent = '▶'; };
+            }).catch(function(err) {
+                console.error('[VoiceNote] Playback failed:', err);
+                playBtn.textContent = '▶';
+                mpToast('Playback failed: ' + err.message, 'error', 3000);
+            });
+        }
     });
 
     // ── CHAT SEND ──
@@ -5992,6 +6292,259 @@
 
     // Tell extension we're ready
     vscode.postMessage({ command: 'ready' });
+
+    // ── NIP-88: POLL HANDLERS ──
+    (function () {
+        var toggleBtn = document.getElementById('poll-toggle-btn');
+        var createForm = document.getElementById('poll-create-form');
+        var addOptBtn = document.getElementById('poll-add-option');
+        var cancelBtn = document.getElementById('poll-cancel');
+        var submitBtn = document.getElementById('poll-submit');
+        var optsList = document.getElementById('poll-options-list');
+
+        if (toggleBtn) toggleBtn.addEventListener('click', function () {
+            createForm.style.display = createForm.style.display === 'none' ? 'block' : 'none';
+        });
+        if (addOptBtn) addOptBtn.addEventListener('click', function () {
+            var input = document.createElement('input');
+            input.className = 'chat-input poll-option-input';
+            input.placeholder = 'Option ' + (optsList.children.length + 1);
+            input.style.marginBottom = '4px';
+            optsList.appendChild(input);
+        });
+        if (cancelBtn) cancelBtn.addEventListener('click', function () {
+            createForm.style.display = 'none';
+        });
+        if (submitBtn) submitBtn.addEventListener('click', function () {
+            var question = document.getElementById('poll-question').value.trim();
+            var options = [];
+            document.querySelectorAll('.poll-option-input').forEach(function (el) {
+                if (el.value.trim()) options.push(el.value.trim());
+            });
+            var expiry = parseInt(document.getElementById('poll-expiry').value);
+            if (question && options.length >= 2) {
+                vscode.postMessage({ command: 'nostrCreatePoll', question: question, options: options, expiresIn: expiry > 0 ? expiry : undefined });
+            } else {
+                alert('Question and at least 2 options required');
+            }
+        });
+
+        // Voting delegation
+        document.addEventListener('click', function (e) {
+            var opt = e.target.closest('.poll-option');
+            if (opt && !opt.classList.contains('poll-results')) {
+                var pollId = opt.closest('.poll-card').dataset.pollId;
+                var index = parseInt(opt.dataset.option);
+                vscode.postMessage({ command: 'nostrVotePoll', pollEventId: pollId, optionIndices: [index] });
+                // Optimistic UI
+                if (_polls[pollId]) _polls[pollId].voted = true;
+                renderChatFeed();
+            }
+        });
+    })();
+
+    // ── NIP-58: BADGE HANDLERS ──
+    (function () {
+        var createToggle = document.getElementById('badge-create-toggle');
+        var createForm = document.getElementById('badge-create-form');
+        var createSubmit = document.getElementById('badge-create-submit');
+        var createCancel = document.getElementById('badge-create-cancel');
+        var awardForm = document.getElementById('badge-award-form');
+        var awardSubmit = document.getElementById('badge-award-submit');
+        var awardCancel = document.getElementById('badge-award-cancel');
+
+        if (createToggle) createToggle.addEventListener('click', function () {
+            createForm.style.display = 'block';
+            awardForm.style.display = 'none';
+        });
+        if (createCancel) createCancel.addEventListener('click', function () {
+            createForm.style.display = 'none';
+        });
+        if (createSubmit) createSubmit.addEventListener('click', function () {
+            var id = document.getElementById('badge-id').value.trim();
+            var name = document.getElementById('badge-name').value.trim();
+            var desc = document.getElementById('badge-description').value.trim();
+            var img = document.getElementById('badge-image').value.trim();
+            if (id && name) {
+                vscode.postMessage({ command: 'nostrCreateBadge', id: id, name: name, description: desc, image: img || undefined });
+            }
+        });
+
+        if (awardCancel) awardCancel.addEventListener('click', function () {
+            awardForm.style.display = 'none';
+        });
+        if (awardSubmit) awardSubmit.addEventListener('click', function () {
+            var badgeId = document.getElementById('badge-award-select').value;
+            var pks = document.getElementById('badge-award-pubkeys').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+            if (badgeId && pks.length > 0) {
+                vscode.postMessage({ command: 'nostrAwardBadge', badgeId: badgeId, pubkeys: pks });
+                awardForm.style.display = 'none';
+            }
+        });
+
+        // Award button in gallery
+        document.addEventListener('click', function (e) {
+            var btn = e.target.closest('.badge-award-btn');
+            if (btn) {
+                var badgeId = btn.dataset.badgeId;
+                var select = document.getElementById('badge-award-select');
+                if (select) {
+                    select.innerHTML = Object.keys(_badges).map(function (k) {
+                        var b = _badges[k];
+                        return '<option value="' + b.id + '"' + (b.id === badgeId ? ' selected' : '') + '>' + safeHTML(b.name) + '</option>';
+                    }).join('');
+                }
+                awardForm.style.display = 'block';
+                createForm.style.display = 'none';
+                document.getElementById('badge-award-pubkeys').focus();
+            }
+        });
+    })();
+
+    // ── NIP-90: DVM HANDLERS ──
+    (function () {
+        var submitBtn = document.getElementById('dvm-submit');
+        if (submitBtn) submitBtn.addEventListener('click', function () {
+            var jobKind = parseInt(document.getElementById('dvm-job-kind').value);
+            var input = document.getElementById('dvm-input').value.trim();
+            var bid = document.getElementById('dvm-bid').value;
+            var paramsText = document.getElementById('dvm-params').value.trim();
+            if (!input) return;
+
+            var params = {};
+            if (paramsText) {
+                paramsText.split('\n').forEach(function (line) {
+                    var parts = line.split('=');
+                    if (parts.length === 2) params[parts[0].trim()] = parts[1].trim();
+                });
+            }
+
+            vscode.postMessage({
+                command: 'nostrSubmitDvmJob',
+                jobKind: jobKind,
+                inputs: [{ data: input, type: 'text' }],
+                params: Object.keys(params).length > 0 ? params : undefined,
+                bidMsats: bid ? parseInt(bid) * 1000 : undefined
+            });
+        });
+    })();
+
+    // ── NIP-39: IDENTITY HANDLERS ──
+    (function () {
+        var addBtn = document.getElementById('identity-add-claim');
+        var publishBtn = document.getElementById('identity-publish');
+
+        if (addBtn) addBtn.addEventListener('click', function () {
+            var platform = document.getElementById('identity-platform').value;
+            var identity = document.getElementById('identity-username').value.trim();
+            var proof = document.getElementById('identity-proof').value.trim();
+            if (identity) {
+                _identityClaims.push({ platform: platform, identity: identity, proof: proof });
+                renderIdentityClaims();
+                document.getElementById('identity-username').value = '';
+                document.getElementById('identity-proof').value = '';
+            }
+        });
+
+        if (publishBtn) publishBtn.addEventListener('click', function () {
+            if (_identityClaims.length > 0) {
+                vscode.postMessage({ command: 'nostrPublishIdentity', claims: _identityClaims });
+            }
+        });
+
+        document.addEventListener('click', function (e) {
+            var btn = e.target.closest('.identity-remove-btn');
+            if (btn) {
+                var idx = parseInt(btn.dataset.idx);
+                _identityClaims.splice(idx, 1);
+                renderIdentityClaims();
+            }
+        });
+    })();
+
+    // ── NIP-A0: VOICE NOTE HANDLERS ──
+    (function () {
+        var recordBtn = document.getElementById('voice-note-btn');
+        var recorderDiv = document.getElementById('voice-note-recorder');
+        var cancelBtn = document.getElementById('voice-note-cancel');
+        var sendBtn = document.getElementById('voice-note-send');
+        var timeEl = document.getElementById('voice-rec-time');
+
+        if (recordBtn) recordBtn.addEventListener('click', async function () {
+            if (_voiceNoteRecording) return;
+            try {
+                var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                _voiceNoteMediaRecorder = new MediaRecorder(stream);
+                _voiceNoteChunks = [];
+                _voiceNoteMediaRecorder.ondataavailable = function (e) { if (e.data.size > 0) _voiceNoteChunks.push(e.data); };
+                _voiceNoteMediaRecorder.onstop = function () {
+                    stream.getTracks().forEach(function(t) { t.stop(); });
+                };
+                _voiceNoteMediaRecorder.start();
+                _voiceNoteRecording = true;
+                _voiceNoteStartTime = Date.now();
+                recorderDiv.style.display = 'flex';
+                _voiceNoteTimer = setInterval(function () {
+                    var s = Math.floor((Date.now() - _voiceNoteStartTime) / 1000);
+                    timeEl.textContent = Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2);
+                }, 1000);
+            } catch (err) {
+                console.error('[VoiceNote] Error:', err);
+                mpToast('Microphone access denied or unavailable: ' + err.message, 'error', 5000);
+            }
+        });
+
+        if (cancelBtn) cancelBtn.addEventListener('click', function () {
+            if (_voiceNoteMediaRecorder && _voiceNoteMediaRecorder.state !== 'inactive') {
+                _voiceNoteMediaRecorder.stop();
+            }
+            if (_voiceNoteTimer) clearInterval(_voiceNoteTimer);
+            _voiceNoteRecording = false;
+            recorderDiv.style.display = 'none';
+        });
+
+        if (sendBtn) sendBtn.addEventListener('click', function () {
+            if (!_voiceNoteMediaRecorder) return;
+            
+            _voiceNoteMediaRecorder.onstop = function () {
+                var blob = new Blob(_voiceNoteChunks, { type: 'audio/webm' });
+                var duration = Math.floor((Date.now() - _voiceNoteStartTime) / 1000);
+                
+                // Use existing IPFS pinning service via extension message
+                var reader = new FileReader();
+                reader.onload = function () {
+                    var base64 = reader.result.split(',')[1];
+                    vscode.postMessage({ 
+                        command: 'ipfsPin', 
+                        content: base64, 
+                        name: 'voice-note-' + Date.now() + '.webm' 
+                    });
+                    
+                    var ipfsHandler = function(e) {
+                        var msg = e.data;
+                        if (msg.type === 'ipfsPinResult' && msg.success) {
+                            window.removeEventListener('message', ipfsHandler);
+                            var url = 'ipfs://' + msg.cid;
+                            vscode.postMessage({ 
+                                command: 'nostrSendVoiceNote', 
+                                audioUrl: url, 
+                                durationSecs: duration 
+                            });
+                        }
+                    };
+                    window.addEventListener('message', ipfsHandler);
+                };
+                reader.readAsDataURL(blob);
+            };
+            
+            if (_voiceNoteMediaRecorder.state !== 'inactive') {
+                _voiceNoteMediaRecorder.stop();
+            }
+            if (_voiceNoteTimer) clearInterval(_voiceNoteTimer);
+            _voiceNoteRecording = false;
+            recorderDiv.style.display = 'none';
+        });
+    })();
 
     // Request Nostr identity on load
     vscode.postMessage({ command: 'nostrGetIdentity' });
