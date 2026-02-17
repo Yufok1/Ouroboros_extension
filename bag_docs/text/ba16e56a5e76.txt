@@ -1,0 +1,107 @@
+# ARCADE.DEV INTEGRATION - Enterprise MCP Distribution
+
+## What is Arcade.dev?
+Arcade.dev is a security-first MCP runtime and distribution platform.
+It provides OAuth, secrets management, audit trails, and enterprise compliance
+for AI tool distribution.
+
+## Why Arcade?
+- **Security**: OAuth-based authentication for sensitive tools
+- **Secrets Management**: Secure handling of API keys (VAST_API_KEY, HF_TOKEN)
+- **Audit Trails**: Full logging of tool invocations
+- **Enterprise Compliance**: SOC2, GDPR-ready infrastructure
+- **Distribution**: Marketplace for MCP toolkits
+
+## Ouroboros + Arcade
+When compiled with `--arcade`, capsules generate a full Arcade-compatible package:
+
+```
+champion_gen8_arcade/
+├── champion_gen8_arcade/
+│   ├── __init__.py
+│   └── tools/
+│       ├── inference.py    # @tool decorated
+│       ├── slots.py        # Council management
+│       ├── bag.py          # FelixBag memory
+│       ├── vast.py         # @tool
+│       └── ...
+├── evals/
+├── tests/
+└── pyproject.toml
+```
+
+## Tool Categories
+
+### Standard Tools (no auth)
+- Inference: forward, embed_text, generate, classify, rerank
+- Slots: plug_model, unplug_slot, list_slots, invoke_slot
+- Bag: bag_get, bag_put, bag_search, pocket, summon
+- Council: broadcast, debate, chain, compare
+
+### Auth-Required Tools
+All Vast.ai tools require `@tool`:
+- vast_search, vast_rent, vast_instances, vast_stop
+- vast_run, vast_load_model, vast_generate, vast_embed
+- vast_broadcast, vast_distribute
+
+### Secret-Required Tools
+HuggingFace tools optionally use HF_TOKEN:
+- hub_search, hub_search_datasets, hub_download, hub_plug
+
+## Installation
+```bash
+pip install arcade-tdk>=3.2.2
+pip install arcade-mcp[evals]>=1.8.2
+```
+
+## Usage
+```python
+from arcade_tdk import tool
+from typing import Annotated
+
+@tool
+def my_tool(
+    param: Annotated[str, "Description of parameter"]
+) -> str:
+    # Tool docstring here
+    return result
+
+@tool
+def auth_tool(
+    instance_id: Annotated[str, "Vast.ai instance ID"]
+) -> str:
+    # Requires Vast.ai authentication
+    return result
+```
+
+## Arcade CLI
+```bash
+# Create new toolkit
+arcade new my_toolkit --full
+
+# Run evals
+arcade evals run
+
+# Serve locally
+arcade serve
+```
+
+## Security Model
+1. **OAuth Flow**: User authenticates via Arcade
+2. **Token Exchange**: Arcade provides scoped tokens
+3. **Audit Log**: All tool calls logged
+4. **Rate Limiting**: Per-user rate limits
+5. **Secrets Vault**: API keys never exposed to client
+
+## Distribution
+Arcade marketplace handles:
+- Package hosting
+- Version management
+- Usage analytics
+- Billing (if monetized)
+- Security scanning
+
+## Links
+- Arcade.dev: https://arcade.dev
+- Documentation: https://docs.arcade.dev
+- TDK Reference: https://docs.arcade.dev/tdk
