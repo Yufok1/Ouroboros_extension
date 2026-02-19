@@ -76,6 +76,12 @@ system_integration_summary.md
 vast_gpu_enhancement_plan.md
 living_research_mind.md
 
+# Dev/debug notes not needed in package
+SMART_LOADER_TODO.md
+cleaned_guide.txt
+media/check_logic.txt
+media/levels.txt
+
 # Claude/agent working dirs
 .claude/**
 .crush/**

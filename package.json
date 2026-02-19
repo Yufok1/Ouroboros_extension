@@ -205,8 +205,8 @@
         },
         "champion.tools.visualization": {
           "type": "boolean",
-          "default": true,
-          "description": "Enable visualization tools (5 tools, requires rerun-sdk)",
+          "default": false,
+          "description": "Enable visualization tools (5 tools, requires rerun-sdk — optional)",
           "order": 21
         },
         "champion.tools.status": {

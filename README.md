@@ -4,7 +4,7 @@ Local-first AI orchestration for VS Code and compatible editors. Run multi-model
 
 ## Core Features
 
-- **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Rich metadata cards show model author, task, downloads, license, and size. Real-time loading progress for large models with per-slot state isolation.
+- **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Smart loader auto-detects model type (LLM, Embedding, SEQ2SEQ, Vision, VLM, Classifier) and routes to the correct loader. Rich metadata cards show model author, task, downloads, license, and size.
 - **140+ MCP Tools** — Full MCP/SSE tool surface for IDE agents and automation. Works with any MCP client (Claude Code, Cursor, Windsurf, etc.).
 - **Workflow Engine v2.1** — 9 node types: `invoke_slot`, `bag_search`, `hub_search`, `embed_text`, `classify`, `rerank`, `observe`, `conditional`, and `web_search`. Build DAGs with expression interpolation, conditional branching, and live execution tracing.
 - **Semantic Memory (FelixBag)** — Local embedding store with search, catalog, induction, and export. Persistent across sessions.
@@ -116,14 +116,14 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.2
+## What's New in 0.7.3
 
-- **NIP Expansion** — Full UI support for NIP-88 Polls, NIP-A0 Voice Messages (IPFS-backed), NIP-58 Badges, NIP-90 Data Vending Machines (AI Jobs), and NIP-39 External Identity Claims.
-- **Improved Community Chat** — Inline rendering for polls, voice notes, and identity badges.
-- **Relay Auth** — Support for NIP-42 AUTH challenges with private relays.
-- **P2P Voice Rooms** — Real-time NIP-53 voice communication with PeerJS/WebRTC transport.
-- **FelixBag auto-persistence** — Semantic memory survives restarts with auto-load and periodic background saves.
-- **Local git versioning** — Version control for individual memory items directly from the UI.
+- **FelixBag Persistence** — Semantic memory now auto-loads from `.bag_state.json` on startup and auto-saves on exit + every 5 minutes. No more ephemeral state loss on restart. Cascade chain and graph operations are also backed to disk.
+- **TUI Live Chat Fix** — Live Inference mode no longer echoes the prompt back in AI responses. All four generate sites now use token-index slicing (`outputs[0][_in_len:]`) instead of fragile string stripping. Instruct models now receive proper chat-template formatted prompts (`apply_chat_template`).
+- **Smart Loader Expansion** — New auto-routing for classifiers (`zero-shot-classification`, `text-classification`), vision-language models (`image-text-to-text`, `visual-question-answering`, `image-to-text`), and summarization/translation models. Fallback cascade ensures models always get a loader.
+- **Phantom Plugging Fix** — Slots no longer get stuck in "PLUGGING" during concurrent operations. 120s staleness timeout, backend reconciliation, and duplicate-entry prevention.
+- **Plug/Unplug Overhaul** — Independent per-slot tracking, unplug animations, rich HuggingFace metadata cards, and crash-safe model loading.
+- **Rerun Conditional Init** — Rerun bridge only initializes when `champion.tools.visualization` is enabled (defaults to off), eliminating startup noise for non-Rerun users.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

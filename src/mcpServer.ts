@@ -305,10 +305,12 @@ export class MCPServerManager {
             this.startSseHeartbeat();
             this.startPeriodicCacheCleanup();
 
-            // Initialize Rerun bridge (non-blocking).
-            // start_rerun_viewer reuses existing recording if TUI already
-            // started one — no parallel recordings.
-            this.initRerunBridge().catch(() => {});
+            // Initialize Rerun bridge only if visualization is enabled in settings.
+            // Defaults to OFF — user opts in via champion.tools.visualization.
+            const vizEnabled = vscode.workspace.getConfiguration('champion.tools').get('visualization', false);
+            if (vizEnabled) {
+                this.initRerunBridge().catch(() => {});
+            }
 
         } catch (error: any) {
             this.setStatus('error');

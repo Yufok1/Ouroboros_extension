@@ -2,7 +2,18 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
-## [0.7.3] - 2026-02-18
+## [0.7.3] - 2026-02-19
+
+### Brain Introspection Fixes
+- **Fixed**: `show_dims` and `show_rssm` returned all-null values. Root cause: `_OUROBOROS_CONFIG` was missing `deter_dim`, `stoch_dim`, `stoch_classes`, `hidden_dim`, and `action_dim`. All five keys now present with correct values (`deter: 4096`, `stoch: 32x32`, `hidden: 4096`, `action: 8`).
+- **Fixed**: `tree` tool always returned `root: "unknown"` and empty `lineage`. Now reads directly from `_NODE_DOCS` globals to reconstruct lineage with `node_id`, `generation_born`, `fitness`, and `parent_ids`.
+- **Fixed**: Classifier loader (`_load_as_classifier`) failed on RoBERTa-family models due to tokenizer embedding size mismatch (514 vs 512). Added `ignore_mismatched_sizes=True` to `from_pretrained` — updated in both Level 0 and Level 1 of `agent_compiler.py`.
+
+### Unplug State Fix
+- **Fixed**: Slots stuck in "UNPLUGGING" state indefinitely after unplug. Root cause: backend clears model data but retains custom slot name after unplug. `_getSlotVisualState` treated any non-default name as `'plugging'`, so reconciliation never resolved the state.
+- **Fixed**: Added `plugged !== false` guard to `_getSlotVisualState` — a named slot with `plugged: false` from the backend now correctly resolves to `'empty'`.
+- **Added**: 120-second staleness timeout for `_unpluggingSlots` entries, mirroring the existing plugging timeout.
+- **Fixed**: After a plug+unplug cycle, the phantom plugging UI entry persisted for the full 120s instead of clearing immediately. Added reconciliation step 3 — when `list_slots` returns `plugged: false` for a slot index that has a `_pluggingSlots` entry, that entry is cleared on the next poll instead of waiting for the staleness timeout.
 
 ### Plug/Unplug System Overhaul
 - **Fixed**: Chained model plugs no longer wipe each other's loading state. Each plug operation now tracks independently — plug 3 models in sequence and all 3 show real-time progress.
@@ -12,6 +23,32 @@ All notable changes to the "Champion Council" extension will be documented in th
 - **Added**: Rich metadata cards on plugged slot cards — author, task, downloads, likes, license, and size fetched from HuggingFace Hub and displayed as tag badges.
 - **Added**: `model_type` field in `list_slots` response for occupied slots (EMBEDDING, LLM, SEQ2SEQ, etc.).
 - **Added**: Council output panel now clears and shows "Running..." on new operations instead of displaying stale results.
+
+### Smart Loader Expansion
+- **Added**: `zero-shot-classification` and `text-classification` pipeline tags now route to `AutoModelForSequenceClassification` via new `_load_as_classifier` loader. Wrapper exposes `.classify(text)` returning label/score pairs.
+- **Added**: `image-text-to-text`, `visual-question-answering`, and `image-to-text` pipeline tags now route to `AutoModelForVision2Seq` via new `_load_as_vlm` loader. Wrapper exposes `.generate(text=, image=)` for multimodal inference.
+- **Added**: `summarization` and `translation` pipeline tags now correctly route to existing `SEQ2SEQ` loader (previously unrouted).
+- **Added**: Fallback cascade — if a detected model type fails its specific loader, falls through to `_load_as_generic` instead of returning an error immediately.
+
+### Rerun Visualization
+- **Changed**: Rerun viewer no longer auto-launches on startup. All 5 visualization tools remain available — call `start_rerun_viewer` manually to open the viewer when needed.
+- **Fixed**: Rerun bridge initialization now conditional on the `champion.tools.visualization` setting (defaults to `false`). Previously, the bridge always attempted to start on activation, causing noise for users not using Rerun.
+
+### FelixBag Persistence
+- **Added**: FelixBag auto-loads from `.bag_state.json` on MCP server startup — memory survives process restarts with no manual action required.
+- **Added**: `atexit` auto-save + 5-minute periodic background save (both proxy and normal mode). No more ephemeral state loss on crash or restart.
+- **Added**: `cascade_chain` operations backed by FelixBag — provenance chain events serialized to disk and restored on lookup.
+- **Added**: `cascade_graph` operations backed by FelixBag — causation graph events and links serialized to disk and restored on lookup.
+
+### TUI Live Chat Fix
+- **Fixed**: TUI chat (mode 1 — Live Inference) echoed the prompt back at the start of every AI response. Root cause: `tokenizer.decode(outputs[0], ...)` included the input token IDs. All four generate sites in the capsule now save `_in_len = inputs['input_ids'].shape[-1]` before generation and decode only `outputs[0][_in_len:]`, stripping the prompt from the output cleanly.
+- **Added**: Chat template support for instruct models — `apply_chat_template` is now called when the tokenizer supports it, producing correct role-tagged prompts for Llama, Mistral, Qwen, and other instruct-format models.
+
+### Phantom Plugging State Fix
+- **Fixed**: Slots could get stuck in "PLUGGING" state indefinitely during concurrent plug/swap/clone operations. Root cause: optimistic UI state not reconciled with backend on completion or timeout.
+- **Added**: 120-second staleness timeout — phantom plugging entries auto-clear if no completion event arrives.
+- **Added**: Backend reconciliation — `list_slots` responses now clear plugging entries for models that are already confirmed plugged.
+- **Fixed**: Duplicate plugging entries from `doPlug()` + activity sentinel creating two tracking entries for the same operation.
 
 ## [0.7.2] - 2026-02-17
 

@@ -864,7 +864,7 @@
         if (hasModel || rawStatus === 'ready' || rawStatus === 'plugged' || rawStatus === 'occupied' || rawStatus === 'active' || rawStatus === 'online' || rawStatus === 'running') {
             return 'plugged';
         }
-        if (hasNamedTarget) {
+        if (hasNamedTarget && slot.plugged !== false) {
             return 'plugging';
         }
         return 'empty';
@@ -889,11 +889,55 @@
 
         // Clear unplugging state for slots that are now confirmed empty
         var unpKeys = Object.keys(_unpluggingSlots);
+        var now_unp = Date.now();
         for (var uk = 0; uk < unpKeys.length; uk++) {
             var ui = parseInt(unpKeys[uk]);
             var us = slotsArr[ui];
-            if (!us || _getSlotVisualState(us) === 'empty') {
+            var unpInfo = _unpluggingSlots[unpKeys[uk]];
+            var unpStale = unpInfo && (now_unp - unpInfo.startTime) > 120000;
+            if (!us || _getSlotVisualState(us) === 'empty' || unpStale) {
                 delete _unpluggingSlots[unpKeys[uk]];
+            }
+        }
+
+        // ── PHANTOM PLUGGING FIX ──
+        // 1) Staleness timeout: clear plugging entries older than 120s
+        var now = Date.now();
+        var staleKeys = Object.keys(_pluggingSlots);
+        for (var sk = 0; sk < staleKeys.length; sk++) {
+            var sInfo = _pluggingSlots[staleKeys[sk]];
+            if (sInfo && (now - sInfo.startTime) > 120000) {
+                delete _pluggingSlots[staleKeys[sk]];
+            }
+        }
+        // 2) Reconcile: if backend reports a slot as plugged with a model,
+        //    clear any plugging entry whose modelId matches that slot's model
+        for (var ri = 0; ri < slotsArr.length; ri++) {
+            var rs = slotsArr[ri];
+            if (!rs) continue;
+            var rState = _getSlotVisualState(rs);
+            if (rState !== 'plugged') continue;
+            var rModel = rs.model_source || rs.model_id || rs.model || rs.model_name || '';
+            if (!rModel) continue;
+            var rpKeys = Object.keys(_pluggingSlots);
+            for (var rk = 0; rk < rpKeys.length; rk++) {
+                var rpInfo = _pluggingSlots[rpKeys[rk]];
+                if (rpInfo && rpInfo.modelId === rModel) {
+                    delete _pluggingSlots[rpKeys[rk]];
+                }
+            }
+        }
+        // 3) Reconcile: if backend confirms a slot is empty at an index that
+        //    has a _pluggingSlots entry, clear it immediately — handles plug+unplug cycle
+        for (var ei = 0; ei < slotsArr.length; ei++) {
+            var es = slotsArr[ei];
+            if (!es || es.plugged !== false) continue;
+            var epKeys = Object.keys(_pluggingSlots);
+            for (var ek = 0; ek < epKeys.length; ek++) {
+                var epInfo = _pluggingSlots[epKeys[ek]];
+                if (epInfo && epInfo.slotIndex === ei) {
+                    delete _pluggingSlots[epKeys[ek]];
+                }
             }
         }
 
@@ -3190,9 +3234,11 @@
         var modelId = document.getElementById('plug-model-id').value;
         var slotName = document.getElementById('plug-slot-name').value;
         if (!modelId) return;
-        // Track the plugging operation for loading UI
-        var slotKey = slotName || 'next';
-        _pluggingSlots[slotKey] = { modelId: modelId, startTime: Date.now() };
+        // Clear any existing plugging entry for same modelId to prevent duplicates
+        // (addActivityEntry will also create one when the sentinel event arrives)
+        _clearPluggingEntry(modelId);
+        var slotKey = slotName || 'plug_' + Date.now();
+        _pluggingSlots[slotKey] = { modelId: modelId, startTime: Date.now(), slotName: slotName || null };
         _updatePluggingUI();
         callTool('plug_model', { model_id: modelId, slot_name: slotName || undefined });
         closeModals();
