@@ -116,7 +116,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.3
+## What's New in 0.7.4
+
+- **Voice Processing Overhaul** — Sensitivity and Noise Gate settings now apply real-time DSP to the audio stream, ensuring peers hear the volume changes and silence gating you configure.
+- **UX Engine Hardening** — Fixed semantic color overrides (security badges remain green regardless of theme accent) and resolved UI layout conflicts in the voice note recorder.
+
+
 
 - **FelixBag Persistence** — Semantic memory now auto-loads from `.bag_state.json` on startup and auto-saves on exit + every 5 minutes. No more ephemeral state loss on restart. Cascade chain and graph operations are also backed to disk.
 - **TUI Live Chat Fix** — Live Inference mode no longer echoes the prompt back in AI responses. All four generate sites now use token-index slicing (`outputs[0][_in_len:]`) instead of fragile string stripping. Instruct models now receive proper chat-template formatted prompts (`apply_chat_template`).

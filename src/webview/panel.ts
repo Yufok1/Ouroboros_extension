@@ -107,10 +107,10 @@ export class CouncilPanel {
                 this.send({
                     type: 'nostrIdentity',
                     pubkey: this.nostr!.getPublicKey(),
-                    npub:   this.nostr!.getNpub(),
-                    connected:  this.nostr!.connected,
+                    npub: this.nostr!.getNpub(),
+                    connected: this.nostr!.connected,
                     relayCount: this.nostr!.relayCount,
-                    relays:     this.nostr!.getConnectedRelays()
+                    relays: this.nostr!.getConnectedRelays()
                 });
             });
 
@@ -185,7 +185,7 @@ export class CouncilPanel {
         // Live data poll (slots, status) — detects external changes
         const liveInterval = setInterval(() => {
             if (!this.panel || this.mcp.status !== 'running') { return; }
-            this.fetchLiveToolData().catch(() => {});
+            this.fetchLiveToolData().catch(() => { });
         }, 5000);
         this.disposables.push({ dispose: () => clearInterval(liveInterval) });
     }
@@ -238,16 +238,16 @@ export class CouncilPanel {
             this.send({
                 type: 'nostrIdentity',
                 pubkey: this.nostr.getPublicKey(),
-                npub:   this.nostr.getNpub(),
-                connected:  this.nostr.connected,
+                npub: this.nostr.getNpub(),
+                connected: this.nostr.connected,
                 relayCount: this.nostr.relayCount,
-                relays:     this.nostr.getConnectedRelays()
+                relays: this.nostr.getConnectedRelays()
             });
         } else {
             this.send({
                 type: 'nostrIdentity',
                 pubkey: '',
-                npub:   '',
+                npub: '',
                 connected: false,
                 relayCount: 0,
                 relays: [],
@@ -259,7 +259,7 @@ export class CouncilPanel {
     private pushFullState() {
         this.pushSyncState();
         // Trigger one immediate live fetch (no background polling loop).
-        this.fetchLiveToolData().catch(() => {});
+        this.fetchLiveToolData().catch(() => { });
         // Push persisted gist marketplace items so they appear immediately
         if (this.marketSearch) {
             const allItems = this.marketSearch.getAllItems();
@@ -511,7 +511,7 @@ export class CouncilPanel {
                         break;
                     }
                     if (amountMsats < lnurl.minSendable || amountMsats > lnurl.maxSendable) {
-                        this.send({ type: 'nostrZapResult', success: false, error: `Amount out of range (${lnurl.minSendable/1000}-${lnurl.maxSendable/1000} sats)` });
+                        this.send({ type: 'nostrZapResult', success: false, error: `Amount out of range (${lnurl.minSendable / 1000}-${lnurl.maxSendable / 1000} sats)` });
                         break;
                     }
                     // Step 3: Create zap request event
@@ -1524,7 +1524,7 @@ export class CouncilPanel {
                     } catch { /* skip failed queries */ }
                 }
                 if (totalIndexed > 0) {
-                    this.marketSearch.embedPending().catch(() => {});
+                    this.marketSearch.embedPending().catch(() => { });
                 }
                 this.send({ type: 'gistIndexingComplete', totalIndexed, totalItems: allItems.length });
                 break;
@@ -4862,7 +4862,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
                 </div>
             </div>
             <!-- Voice recording indicator -->
-            <div id="voice-note-recorder" style="display:none;border:1px solid var(--accent);padding:8px;margin:6px 8px;display:flex;align-items:center;gap:8px;">
+            <div id="voice-note-recorder" style="display:none;border:1px solid var(--accent);padding:8px;margin:6px 8px;align-items:center;gap:8px;">
                 <span class="recording-dot" id="voice-rec-dot"></span>
                 <span id="voice-rec-time" style="font-size:10px;font-family:var(--mono);">0:00</span>
                 <div style="flex:1;"></div>
@@ -5073,6 +5073,21 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
                             <span style="font-size:10px;">&#128264;</span>
                             <input type="range" id="voice-master-volume" min="0" max="100" step="1" value="100" style="flex:1;accent-color:var(--accent);" />
                             <span id="voice-master-volume-val" style="font-size:9px;color:var(--text);min-width:28px;text-align:right;">100%</span>
+                        </div>
+                    </div>
+
+                    <!-- Headphones-only local mic monitor (calibration) -->
+                    <div style="margin-bottom:10px;padding:8px;border:1px dashed var(--border);border-radius:4px;background:rgba(255,255,255,0.02);">
+                        <label style="font-size:9px;color:var(--text-dim);display:block;margin-bottom:6px;">HEADPHONES-ONLY MIC MONITOR (CALIBRATION)</label>
+                        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+                            <label style="font-size:8px;color:var(--text);display:flex;gap:4px;align-items:center;">
+                                <input type="checkbox" id="voice-monitor-headphones" />
+                                I am using headphones
+                            </label>
+                            <button class="btn-dim" id="voice-monitor-toggle" style="font-size:9px;padding:2px 8px;">MONITOR OFF</button>
+                        </div>
+                        <div style="font-size:8px;color:var(--text-dim);margin-top:6px;line-height:1.4;">
+                            Sends your mic back to your local output for calibration. Uses the same MASTER VOLUME setting as active voice playback.
                         </div>
                     </div>
 

@@ -2,7 +2,17 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
-## [0.7.3] - 2026-02-19
+## [0.7.4] - 2026-02-19
+
+### Voice processing overhaul
+- **Fixed**: Voice sensitivity and noise gate settings were only affecting the visual level meter, not the actual audio stream. Now applies digital gain (hard-clipped to 16-bit) and noise gate muting directly to the PCM audio buffer before broadcasting to peers.
+- **Fixed**: Voice note recorder UI bug where the recording indicator was always visible due to a CSS display property conflict.
+
+### UX Engine Hardening
+- **Fixed**: Semantic color override in UX engine — "Safe" badges, high-security indicators, and online status dots now retain their semantic Green color instead of being overridden by the user's custom accent color.
+- **Verified**: Full UX settings round-trip persistence and application logic confirmed robust.
+
+
 
 ### Brain Introspection Fixes
 - **Fixed**: `show_dims` and `show_rssm` returned all-null values. Root cause: `_OUROBOROS_CONFIG` was missing `deter_dim`, `stoch_dim`, `stoch_classes`, `hidden_dim`, and `action_dim`. All five keys now present with correct values (`deter: 4096`, `stoch: 32x32`, `hidden: 4096`, `action: 8`).

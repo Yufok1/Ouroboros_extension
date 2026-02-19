@@ -69,6 +69,9 @@
     let _voiceDeafened = false; // true = incoming audio muted
     let _voiceMasterVolume = 100; // 0-100
     let _voiceSelectedDevice = ''; // selected input device name
+    let _voiceMonitorEnabled = false; // local sidetone monitor
+    let _voiceMonitorHeadphonesConfirmed = false; // safety gate
+    let _voiceMonitorGain = null;
 
     // ── WEBSOCKET + AUDIOWORKLET BRIDGE ──
     // Receives raw PCM from extension via WebSocket, produces MediaStream for PeerJS
@@ -76,6 +79,73 @@
     let _audioWorkletNode = null;
     let _audioStreamDest = null;
     let _audioWsCtx = null;
+
+    function _voiceToast(message, kind, ms) {
+        if (typeof mpToast === 'function') mpToast(message, kind || 'info', ms || 2200);
+        else console.log('[VoiceMonitor]', message);
+    }
+
+    function _updateVoiceMonitorUI() {
+        var monitorToggle = document.getElementById('voice-monitor-toggle');
+        var monitorHeadphones = document.getElementById('voice-monitor-headphones');
+
+        if (monitorHeadphones) monitorHeadphones.checked = !!_voiceMonitorHeadphonesConfirmed;
+
+        if (monitorToggle) {
+            var active = _voiceMonitorEnabled && _voiceMonitorHeadphonesConfirmed && _voiceMicOn;
+            monitorToggle.textContent = active ? 'MONITOR ON' : 'MONITOR OFF';
+            monitorToggle.style.background = active ? '#4caf50' : '';
+            monitorToggle.style.color = active ? '#000' : '';
+            monitorToggle.style.fontWeight = active ? 'bold' : '';
+            monitorToggle.title = active
+                ? 'Disable local mic monitor'
+                : 'Enable local mic monitor (headphones required)';
+        }
+    }
+
+    function _applyVoiceMonitorState() {
+        if (!_audioWsCtx || !_audioWorkletNode) {
+            _updateVoiceMonitorUI();
+            return;
+        }
+
+        if (!_voiceMonitorGain) {
+            _voiceMonitorGain = _audioWsCtx.createGain();
+        }
+        _voiceMonitorGain.gain.value = Math.max(0, Math.min(1, _voiceMasterVolume / 100));
+
+        try { _audioWorkletNode.disconnect(_voiceMonitorGain); } catch (e) { }
+        try { _voiceMonitorGain.disconnect(_audioWsCtx.destination); } catch (e) { }
+
+        if (_voiceMonitorEnabled && _voiceMonitorHeadphonesConfirmed && _voiceMicOn) {
+            _audioWorkletNode.connect(_voiceMonitorGain);
+            _voiceMonitorGain.connect(_audioWsCtx.destination);
+        }
+
+        _updateVoiceMonitorUI();
+    }
+
+    function _setVoiceMonitorEnabled(enabled) {
+        if (enabled) {
+            if (!_voiceMonitorHeadphonesConfirmed) {
+                _voiceMonitorEnabled = false;
+                _voiceToast('Enable "I am using headphones" before monitor.', 'warning', 2800);
+                _applyVoiceMonitorState();
+                return;
+            }
+            if (!_voiceMicOn) {
+                _voiceMonitorEnabled = false;
+                _voiceToast('Turn MIC ON to start monitor calibration.', 'info', 2400);
+                _applyVoiceMonitorState();
+                return;
+            }
+            _voiceMonitorEnabled = true;
+            _voiceToast('Headphones monitor enabled (calibration mode).', 'info', 2200);
+        } else {
+            _voiceMonitorEnabled = false;
+        }
+        _applyVoiceMonitorState();
+    }
 
     async function _startAudioBridge(wsPort) {
         if (_audioWs) return; // already connected
@@ -158,6 +228,7 @@
             };
 
             VoiceP2P.setLocalStream(_audioStreamDest.stream);
+            _applyVoiceMonitorState();
             console.log('[AudioBridge] MediaStream set on VoiceP2P');
         } catch (err) {
             console.error('[AudioBridge] Failed to start:', err);
@@ -165,11 +236,15 @@
     }
 
     function _stopAudioBridge() {
-        if (_audioWs) { try { _audioWs.close(); } catch (e) {} _audioWs = null; }
-        if (_audioWorkletNode) { try { _audioWorkletNode.disconnect(); } catch (e) {} _audioWorkletNode = null; }
+        if (_audioWorkletNode && _voiceMonitorGain) { try { _audioWorkletNode.disconnect(_voiceMonitorGain); } catch (e) { } }
+        if (_voiceMonitorGain && _audioWsCtx) { try { _voiceMonitorGain.disconnect(_audioWsCtx.destination); } catch (e) { } }
+        _voiceMonitorGain = null;
+        if (_audioWs) { try { _audioWs.close(); } catch (e) { } _audioWs = null; }
+        if (_audioWorkletNode) { try { _audioWorkletNode.disconnect(); } catch (e) { } _audioWorkletNode = null; }
         _audioStreamDest = null;
-        if (_audioWsCtx) { try { _audioWsCtx.close(); } catch (e) {} _audioWsCtx = null; }
+        if (_audioWsCtx) { try { _audioWsCtx.close(); } catch (e) { } _audioWsCtx = null; }
         VoiceP2P.clearLocalStream();
+        _updateVoiceMonitorUI();
     }
 
     // ── P2P VOICE MANAGER (PeerJS) ──
@@ -214,7 +289,7 @@
         function detachPeer(peerId) {
             var info = _peers[peerId];
             if (!info) return;
-            if (info.call) try { info.call.close(); } catch (e) {}
+            if (info.call) try { info.call.close(); } catch (e) { }
             if (info.audioEl) { info.audioEl.pause(); info.audioEl.srcObject = null; info.audioEl.remove(); }
             delete _peers[peerId];
             renderVoiceParticipants();
@@ -319,8 +394,8 @@
                 if (_speakingRAF) { cancelAnimationFrame(_speakingRAF); _speakingRAF = null; }
                 Object.keys(_peers).forEach(function (pid) { detachPeer(pid); });
                 _peers = {};
-                if (_peer) { try { _peer.destroy(); } catch (e) {} _peer = null; }
-                if (_audioCtx) { try { _audioCtx.close(); } catch (e) {} _audioCtx = null; }
+                if (_peer) { try { _peer.destroy(); } catch (e) { } _peer = null; }
+                if (_audioCtx) { try { _audioCtx.close(); } catch (e) { } _audioCtx = null; }
                 _localStream = null;
                 _myPeerId = null;
             },
@@ -468,9 +543,12 @@
                     renderVoiceParticipants();
                     // Start audio bridge for peer streaming
                     if (msg.audioWsPort) { _startAudioBridge(msg.audioWsPort); }
+                    _updateVoiceMonitorUI();
                     break;
                 case 'micStopped':
                     _voiceMicOn = false;
+                    _voiceMonitorEnabled = false; // safety: monitor only during active calibration
+                    _applyVoiceMonitorState();
                     var micToggleEl2 = document.getElementById('voice-mic-toggle');
                     if (micToggleEl2) micToggleEl2.classList.remove('active');
                     var micLabelEl2 = document.getElementById('voice-mic-label');
@@ -713,7 +791,7 @@
         if (!dot || !statusEl) return;
         dot.className = 'dot ' + (st.serverStatus === 'running' ? 'green pulse' :
             st.serverStatus === 'starting' ? 'amber pulse' :
-            st.serverStatus === 'error' ? 'red' : 'off');
+                st.serverStatus === 'error' ? 'red' : 'off');
         statusEl.textContent = (st.serverStatus || 'offline').toUpperCase();
 
         var toolsEl = document.getElementById('hd-tools');
@@ -1381,8 +1459,8 @@
             var right = p.error ? ('<span style="color:var(--red);">' + _esc(String(p.error)) + '</span>') : status;
             rows.push(
                 '<div class="diag-probe-item">' +
-                    '<span class="diag-probe-name" title="' + _esc((p.label || p.id || 'probe')) + '">' + _esc((p.label || p.id || 'probe')) + '</span>' +
-                    '<span>' + right + '</span>' +
+                '<span class="diag-probe-name" title="' + _esc((p.label || p.id || 'probe')) + '">' + _esc((p.label || p.id || 'probe')) + '</span>' +
+                '<span>' + right + '</span>' +
                 '</div>'
             );
         }
@@ -1416,22 +1494,22 @@
 
         return '<div class="diag-shell">' +
             '<div class="diag-head">' +
-                '<div class="diag-head-title">' + _esc(label) + '</div>' +
-                '<div class="diag-badges">' + badges + '</div>' +
+            '<div class="diag-head-title">' + _esc(label) + '</div>' +
+            '<div class="diag-badges">' + badges + '</div>' +
             '</div>' +
             '<div class="diag-meta">' + meta + '</div>' +
             _diagKvs(resolved) +
             (note ? '<div class="diag-note">' + _esc(String(note)) + '</div>' : '') +
             '<details class="diag-details">' +
-                '<summary>Resolved payload</summary>' +
-                '<pre>' + _diagPretty(resolved, 25000) + '</pre>' +
+            '<summary>Resolved payload</summary>' +
+            '<pre>' + _diagPretty(resolved, 25000) + '</pre>' +
             '</details>' +
             '<details class="diag-details">' +
-                '<summary>Probe trace (' + String(probes.length) + ')</summary>' +
-                _diagProbeList(probes) +
-                '<pre>' + _diagPretty(probes, 25000) + '</pre>' +
+            '<summary>Probe trace (' + String(probes.length) + ')</summary>' +
+            _diagProbeList(probes) +
+            '<pre>' + _diagPretty(probes, 25000) + '</pre>' +
             '</details>' +
-        '</div>';
+            '</div>';
     }
 
     function handleDiagResult(msg) {
@@ -1444,11 +1522,11 @@
         if (msg.error) {
             diagOut.innerHTML = '<div class="diag-shell error">' +
                 '<div class="diag-head">' +
-                    '<div class="diag-head-title">' + _esc(diagKey) + '</div>' +
-                    '<div class="diag-badges">' + _diagBadge('error', 'err') + '</div>' +
+                '<div class="diag-head-title">' + _esc(diagKey) + '</div>' +
+                '<div class="diag-badges">' + _diagBadge('error', 'err') + '</div>' +
                 '</div>' +
                 '<div class="diag-note">' + _esc(String(msg.error)) + '</div>' +
-            '</div>';
+                '</div>';
             return;
         }
 
@@ -1479,7 +1557,7 @@
     window.runDiagnostic = runDiagnostic;
 
     var MEMORY_TOOLS = ['bag_catalog', 'bag_search', 'bag_get', 'bag_export', 'bag_induct', 'bag_forget', 'bag_put', 'pocket', 'summon', 'materialize', 'get_cached'];
-    var COUNCIL_TOOLS = ['council_status', 'all_slots', 'broadcast', 'council_broadcast', 'set_consensus', 'debate', 'chain', 'slot_info', 'get_slot_params', 'invoke_slot', 'plug_model', 'unplug_slot', 'clone_slot', 'mu'+'tate_slot', 'rename_slot', 'swap_slots', 'hub_plug', 'cu'+'ll_slot'];
+    var COUNCIL_TOOLS = ['council_status', 'all_slots', 'broadcast', 'council_broadcast', 'set_consensus', 'debate', 'chain', 'slot_info', 'get_slot_params', 'invoke_slot', 'plug_model', 'unplug_slot', 'clone_slot', 'mu' + 'tate_slot', 'rename_slot', 'swap_slots', 'hub_plug', 'cu' + 'll_slot'];
     var WORKFLOW_TOOLS = ['workflow_list', 'workflow_get', 'workflow_execute', 'workflow_status'];
 
     function parseToolData(data) {
@@ -1490,7 +1568,7 @@
         return JSON.stringify(data, null, 2);
     }
 
-    function _esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function _esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
     function _countTypes(items) {
         var seen = {};
         for (var i = 0; i < items.length; i++) { seen[items[i].type || 'unknown'] = 1; }
@@ -1536,14 +1614,14 @@
         var p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
         var r, g, b;
         switch (i % 6) {
-            case 0: r=v; g=t; b=p; break;
-            case 1: r=q; g=v; b=p; break;
-            case 2: r=p; g=v; b=t; break;
-            case 3: r=p; g=q; b=v; break;
-            case 4: r=t; g=p; b=v; break;
-            default: r=v; g=p; b=q; break;
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
         }
-        var hex = function(n) { var x = Math.round(n*255).toString(16); return x.length<2?'0'+x:x; };
+        var hex = function (n) { var x = Math.round(n * 255).toString(16); return x.length < 2 ? '0' + x : x; };
         var color = '#' + hex(r) + hex(g) + hex(b);
         _wfColorCache[workflowId] = color;
         return color;
@@ -1869,7 +1947,7 @@
         listEl.innerHTML = _wfCatalog.map(function (wf) {
             var active = wf.id === _wfSelectedId ? ' active' : '';
             var isExec = _wfLastExec && _wfNormalizeStatus(_wfLastExec.status) === 'running' &&
-                         (wf.id === _wfCurrentExecutionId || wf.id === _wfSelectedId);
+                (wf.id === _wfCurrentExecutionId || wf.id === _wfSelectedId);
             var executing = isExec ? ' executing' : '';
             var color = _wfWorkflowColor(wf.id);
             var style = '--wf-color:' + color + ';border-left-color:' + color;
@@ -2468,8 +2546,8 @@
 
         var latestLine = tracked
             ? ('Latest commit <span style="color:#22c55e;">' + _esc(meta.headSha || '?') + '</span>' +
-               (meta.latestWhen ? ' • ' + _esc(meta.latestWhen) : '') +
-               (meta.latestSubject ? ' • ' + _esc(meta.latestSubject) : ''))
+                (meta.latestWhen ? ' • ' + _esc(meta.latestWhen) : '') +
+                (meta.latestSubject ? ' • ' + _esc(meta.latestSubject) : ''))
             : 'Not committed yet.';
 
         var diffLine = (tracked && commitCount >= 2)
@@ -2478,15 +2556,15 @@
 
         host.innerHTML =
             '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">' +
-                '<div style="min-width:0;">' +
-                    '<div style="color:var(--text);">Snapshot file: <span style="color:var(--accent);">' + _esc(filePath || 'bag_docs/...') + '</span></div>' +
-                    '<div style="color:var(--text-dim);margin-top:2px;">' + latestLine + ' • ' + commitCount + ' commit' + (commitCount === 1 ? '' : 's') + '</div>' +
-                    '<div style="color:var(--text-dim);margin-top:2px;">' + diffLine + '</div>' +
-                    '<div style="color:var(--text-dim);margin-top:4px;">Live memory is editable. Commits create a git history you can diff, audit, and restore.</div>' +
-                '</div>' +
-                '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">' +
-                    openBtn + diffBtn + refreshBtn +
-                '</div>' +
+            '<div style="min-width:0;">' +
+            '<div style="color:var(--text);">Snapshot file: <span style="color:var(--accent);">' + _esc(filePath || 'bag_docs/...') + '</span></div>' +
+            '<div style="color:var(--text-dim);margin-top:2px;">' + latestLine + ' • ' + commitCount + ' commit' + (commitCount === 1 ? '' : 's') + '</div>' +
+            '<div style="color:var(--text-dim);margin-top:2px;">' + diffLine + '</div>' +
+            '<div style="color:var(--text-dim);margin-top:4px;">Live memory is editable. Commits create a git history you can diff, audit, and restore.</div>' +
+            '</div>' +
+            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">' +
+            openBtn + diffBtn + refreshBtn +
+            '</div>' +
             '</div>';
     }
 
@@ -2547,14 +2625,14 @@
         var title = 'Diff ' + _esc(msg.fromSha || '?') + ' → ' + _esc(msg.toSha || '?');
         var truncMsg = truncated
             ? '<div style="color:#f59e0b;font-size:9px;margin-top:4px;">Diff truncated (' + rawDiff.length + ' chars). ' +
-              '<button onclick="openBagNativeDiff(\'' + keyJs + '\')" style="font-size:9px;padding:1px 6px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Open Full Diff in Editor</button></div>'
+            '<button onclick="openBagNativeDiff(\'' + keyJs + '\')" style="font-size:9px;padding:1px 6px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Open Full Diff in Editor</button></div>'
             : '<div style="margin-top:4px;"><button onclick="openBagNativeDiff(\'' + keyJs + '\')" style="font-size:9px;padding:1px 6px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Open in Editor</button></div>';
 
         diffDiv.innerHTML =
             '<div style="padding:6px 8px;border:1px solid var(--border);background:var(--surface2);">' +
-                '<div style="font-size:10px;color:var(--text-dim);margin-bottom:6px;">' + title + '</div>' +
-                '<pre style="margin:0;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;color:var(--text);font-size:10px;line-height:1.45;">' + _esc(displayDiff) + (truncated ? '\n...' : '') + '</pre>' +
-                truncMsg +
+            '<div style="font-size:10px;color:var(--text-dim);margin-bottom:6px;">' + title + '</div>' +
+            '<pre style="margin:0;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;color:var(--text);font-size:10px;line-height:1.45;">' + _esc(displayDiff) + (truncated ? '\n...' : '') + '</pre>' +
+            truncMsg +
             '</div>';
     }
 
@@ -2715,13 +2793,13 @@
             name: prefill.name,
             description: prefill.description,
             body: prefill.body,
-            tags: prefill.tags ? prefill.tags.split(',').map(function(t){ return t.trim(); }) : []
+            tags: prefill.tags ? prefill.tags.split(',').map(function (t) { return t.trim(); }) : []
         });
 
         if (safetyResult.trustLevel === 'blocked') {
             mpToast('BLOCKED: Content contains critical safety flags (' +
-                safetyResult.flags.filter(function(f){ return f.severity === 'critical'; })
-                    .map(function(f){ return f.pattern; }).join(', ') +
+                safetyResult.flags.filter(function (f) { return f.severity === 'critical'; })
+                    .map(function (f) { return f.pattern; }).join(', ') +
                 '). Remove flagged content before publishing.', 'error', 8000);
             return;
         }
@@ -2747,7 +2825,7 @@
         if (safetyResult.trustLevel === 'flagged') {
             mpToast('WARNING: Safety scan flagged this content (score: ' + safetyResult.score +
                 '). Review flagged items: ' +
-                safetyResult.flags.map(function(f){ return f.pattern + ' in ' + f.location; }).join(', ') +
+                safetyResult.flags.map(function (f) { return f.pattern + ' in ' + f.location; }).join(', ') +
                 '. Auto-redaction is ' + (_privacySettings.autoRedact ? 'ON' : 'OFF') + '.',
                 'error', 8000);
         } else if (prefill.wrapped) {
@@ -2777,14 +2855,14 @@
         var previewHtml = extra ? ' <span style="color:var(--text-dim);font-size:10px;font-style:italic;">— ' + _esc(extra) + '</span>' : '';
         return '<div>' +
             '<div class="memory-item" onclick="drillMemItem(\'' + _esc(key).replace(/'/g, "\\'") + '\')" style="cursor:pointer;">' +
-                '<div class="mi-header">' +
-                    '<span class="mi-name" title="' + _esc(key) + '">' + _esc(displayName) + '</span>' +
-                    typeHtml + previewHtml +
-                '</div>' +
-                '<div class="mi-meta"><span class="mi-id">' + _esc(shortId) + '</span></div>' +
+            '<div class="mi-header">' +
+            '<span class="mi-name" title="' + _esc(key) + '">' + _esc(displayName) + '</span>' +
+            typeHtml + previewHtml +
+            '</div>' +
+            '<div class="mi-meta"><span class="mi-id">' + _esc(shortId) + '</span></div>' +
             '</div>' +
             '<div id="drill-' + _esc(key) + '" style="display:none;background:var(--surface);border:1px solid var(--border);border-top:none;max-height:400px;overflow:auto;font-family:monospace;font-size:11px;line-height:1.5;"></div>' +
-        '</div>';
+            '</div>';
     }
 
     function formatToolOutput(raw) {
@@ -2881,7 +2959,7 @@
                             val = got;
                         } else if (typeof val === 'undefined') {
                             // get_cached returns the original bag_get result as a string
-                            try { var inner = typeof got === 'string' ? JSON.parse(got) : got; val = inner.value; } catch(e2) { val = text; }
+                            try { var inner = typeof got === 'string' ? JSON.parse(got) : got; val = inner.value; } catch (e2) { val = text; }
                         }
                         var contentStr = typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val || '');
                         var lineCount = contentStr.split('\n').length;
@@ -2905,11 +2983,11 @@
                             : 'font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:var(--accent);border:1px solid var(--border);border-radius:3px;';
                         drillDiv.innerHTML =
                             '<div style="padding:4px 12px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">' +
-                                '<span>' + lineCount + ' lines · ' + _fmtSize(contentStr.length) + ' · v' + verNum + '</span>' +
-                                '<div style="display:flex;align-items:center;gap:6px;">' +
-                                    '<button id="' + publishBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="publishBagToMarketplace(this)" style="font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Publish to Marketplace</button>' +
-                                    '<button id="' + commitBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="commitBagVersion(this)"' + (gitDisabled ? ' disabled title="Git not available"' : '') + ' style="' + commitBtnStyle + '">Commit Version</button>' +
-                                '</div>' +
+                            '<span>' + lineCount + ' lines · ' + _fmtSize(contentStr.length) + ' · v' + verNum + '</span>' +
+                            '<div style="display:flex;align-items:center;gap:6px;">' +
+                            '<button id="' + publishBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="publishBagToMarketplace(this)" style="font-size:9px;padding:2px 8px;cursor:pointer;background:var(--surface2);color:#60a5fa;border:1px solid var(--border);border-radius:3px;">Publish to Marketplace</button>' +
+                            '<button id="' + commitBtnId + '" data-bag-key="' + _esc(_openDrillKey) + '" onclick="commitBagVersion(this)"' + (gitDisabled ? ' disabled title="Git not available"' : '') + ' style="' + commitBtnStyle + '">Commit Version</button>' +
+                            '</div>' +
                             '</div>' +
                             '<div id="' + gitMetaId + '" style="padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;color:var(--text-dim);">Loading git details...</div>' +
                             '<div id="' + gitDiffId + '" style="display:none;padding:6px 12px;border-bottom:1px solid var(--border);"></div>' +
@@ -3327,6 +3405,10 @@
         var voiceSensVal = document.getElementById('voice-sensitivity-val');
         var voiceGateSlider = document.getElementById('voice-noisegate');
         var voiceGateVal = document.getElementById('voice-noisegate-val');
+        var monitorHeadphones = document.getElementById('voice-monitor-headphones');
+        var monitorToggle = document.getElementById('voice-monitor-toggle');
+
+        _updateVoiceMonitorUI();
 
         // Settings gear toggle
         if (settingsBtn) settingsBtn.addEventListener('click', function () {
@@ -3348,6 +3430,21 @@
             _voiceNoiseGate = val;
             if (voiceGateVal) voiceGateVal.textContent = String(val);
             vscode.postMessage({ command: 'setMicNoiseGate', value: val });
+        });
+
+        // ── HEADPHONES-ONLY LOCAL MONITOR ──
+        if (monitorHeadphones) monitorHeadphones.addEventListener('change', function () {
+            _voiceMonitorHeadphonesConfirmed = !!monitorHeadphones.checked;
+            if (!_voiceMonitorHeadphonesConfirmed && _voiceMonitorEnabled) {
+                _setVoiceMonitorEnabled(false);
+                _voiceToast('Monitor disabled (headphones confirmation removed).', 'info', 2200);
+            } else {
+                _applyVoiceMonitorState();
+            }
+        });
+        if (monitorToggle) monitorToggle.addEventListener('click', function () {
+            if (_voiceMonitorEnabled) _setVoiceMonitorEnabled(false);
+            else _setVoiceMonitorEnabled(true);
         });
 
         // ── INPUT DEVICE SELECTOR ──
@@ -3462,6 +3559,9 @@
             // Apply to all peer audio elements
             var peerAudioEls = document.querySelectorAll('audio[data-peer]');
             peerAudioEls.forEach(function (el) { el.volume = _voiceMasterVolume / 100; });
+            if (_voiceMonitorGain) {
+                _voiceMonitorGain.gain.value = Math.max(0, Math.min(1, _voiceMasterVolume / 100));
+            }
         });
 
         if (refreshBtn) refreshBtn.addEventListener('click', function () {
@@ -3590,7 +3690,7 @@
         } else if (event.kind === 1018) {
             // NIP-88: Poll definition
             if (!_polls[event.id]) {
-                _polls[event.id] = { 
+                _polls[event.id] = {
                     id: event.id,
                     question: event.content,
                     options: (event.tags || []).filter(t => t[0] === 'option').map(t => ({ index: parseInt(t[1]), label: t[2] })),
@@ -4230,27 +4330,27 @@
 
     // ── MARKETPLACE CATEGORY TAXONOMY ──
     var MP_CATEGORIES = {
-        'devops':        'DevOps & CI/CD',
-        'data-eng':      'Data Engineering & ETL',
-        'ml-ai':         'ML / AI Pipelines',
-        'security':      'Security & Compliance',
+        'devops': 'DevOps & CI/CD',
+        'data-eng': 'Data Engineering & ETL',
+        'ml-ai': 'ML / AI Pipelines',
+        'security': 'Security & Compliance',
         'code-analysis': 'Code Analysis & Review',
-        'testing':       'Testing & QA',
-        'docs':          'Documentation',
-        'infra':         'Infrastructure & Cloud',
-        'monitoring':    'Monitoring & Observability',
-        'api':           'API Integration',
-        'database':      'Database Operations',
-        'content':       'Content Generation',
-        'research':      'Research & Analysis',
-        'finance':       'Financial Operations',
-        'healthcare':    'Healthcare & Biotech',
-        'iot':           'IoT & Edge Computing',
-        'legal':         'Legal & Compliance',
-        'automation':    'General Automation',
-        'council':       'Council & Multi-Agent',
-        'memory':        'Memory & Knowledge',
-        'other':         'Other'
+        'testing': 'Testing & QA',
+        'docs': 'Documentation',
+        'infra': 'Infrastructure & Cloud',
+        'monitoring': 'Monitoring & Observability',
+        'api': 'API Integration',
+        'database': 'Database Operations',
+        'content': 'Content Generation',
+        'research': 'Research & Analysis',
+        'finance': 'Financial Operations',
+        'healthcare': 'Healthcare & Biotech',
+        'iot': 'IoT & Edge Computing',
+        'legal': 'Legal & Compliance',
+        'automation': 'General Automation',
+        'council': 'Council & Multi-Agent',
+        'memory': 'Memory & Knowledge',
+        'other': 'Other'
     };
     var _mpFilter = { search: '', category: 'all', sort: 'newest', role: 'all', source: 'all' };
     var _gistMarketplaceItems = [];  // Gist-sourced marketplace items
@@ -4459,12 +4559,12 @@
             filtered = filtered.filter(function (ev) {
                 var p = parseDocContent(ev);
                 return p.name.toLowerCase().indexOf(q) !== -1 ||
-                       p.description.toLowerCase().indexOf(q) !== -1 ||
-                       p.tags.some(function (t) { return t.toLowerCase().indexOf(q) !== -1; }) ||
-                       displayName(ev.pubkey).toLowerCase().indexOf(q) !== -1 ||
-                       p.category.toLowerCase().indexOf(q) !== -1 ||
-                       p.workflowRole.toLowerCase().indexOf(q) !== -1 ||
-                       p.sourceDocType.toLowerCase().indexOf(q) !== -1;
+                    p.description.toLowerCase().indexOf(q) !== -1 ||
+                    p.tags.some(function (t) { return t.toLowerCase().indexOf(q) !== -1; }) ||
+                    displayName(ev.pubkey).toLowerCase().indexOf(q) !== -1 ||
+                    p.category.toLowerCase().indexOf(q) !== -1 ||
+                    p.workflowRole.toLowerCase().indexOf(q) !== -1 ||
+                    p.sourceDocType.toLowerCase().indexOf(q) !== -1;
             });
         }
         // Sort
@@ -4990,18 +5090,18 @@
         if (playBtn) {
             var url = playBtn.dataset.audioUrl;
             if (!url) return;
-            
+
             // Resolve ipfs:// URLs
             if (url.startsWith('ipfs://')) {
                 url = 'https://ipfs.io/ipfs/' + url.slice(7);
             }
-            
+
             var audio = new Audio(url);
             playBtn.textContent = '⌛';
-            audio.play().then(function() {
+            audio.play().then(function () {
                 playBtn.textContent = '⏸';
-                audio.onended = function() { playBtn.textContent = '▶'; };
-            }).catch(function(err) {
+                audio.onended = function () { playBtn.textContent = '▶'; };
+            }).catch(function (err) {
                 console.error('[VoiceNote] Playback failed:', err);
                 playBtn.textContent = '▶';
                 mpToast('Playback failed: ' + err.message, 'error', 3000);
@@ -5255,7 +5355,7 @@
 
         function _wfInitPanZoom() {
             if (_wfPanZoomInstance) {
-                try { _wfPanZoomInstance.destroy(); } catch (ignored) {}
+                try { _wfPanZoomInstance.destroy(); } catch (ignored) { }
                 _wfPanZoomInstance = null;
             }
             if (typeof svgPanZoom !== 'function') return;
@@ -5345,7 +5445,7 @@
             e.preventDefault();
 
             if (_wfPanZoomInstance) {
-                try { _wfPanZoomInstance.disablePan(); } catch (ignored) {}
+                try { _wfPanZoomInstance.disablePan(); } catch (ignored) { }
             }
 
             var pos = _wfGraphMeta.positions[nodeId];
@@ -5394,7 +5494,7 @@
             _wfDragState = null;
 
             if (_wfPanZoomInstance) {
-                try { _wfPanZoomInstance.enablePan(); } catch (ignored) {}
+                try { _wfPanZoomInstance.enablePan(); } catch (ignored) { }
             }
         });
     }
@@ -6197,7 +6297,7 @@
         s('--accent-dim', uxGet('accentColor') + '33');
         s('--surface', uxGet('surfaceColor'));
         s('--border', uxGet('borderColor'));
-        s('--green', uxGet('accentColor'));
+        // s('--green', uxGet('accentColor')); // Keep green semantic!
         s('--mono', FONT_MAP[uxGet('fontFamily')] || FONT_MAP.mono);
         // Contrast
         var ct = uxGet('contrast');
@@ -6616,7 +6716,7 @@
                 _voiceNoteChunks = [];
                 _voiceNoteMediaRecorder.ondataavailable = function (e) { if (e.data.size > 0) _voiceNoteChunks.push(e.data); };
                 _voiceNoteMediaRecorder.onstop = function () {
-                    stream.getTracks().forEach(function(t) { t.stop(); });
+                    stream.getTracks().forEach(function (t) { t.stop(); });
                 };
                 _voiceNoteMediaRecorder.start();
                 _voiceNoteRecording = true;
@@ -6643,30 +6743,30 @@
 
         if (sendBtn) sendBtn.addEventListener('click', function () {
             if (!_voiceNoteMediaRecorder) return;
-            
+
             _voiceNoteMediaRecorder.onstop = function () {
                 var blob = new Blob(_voiceNoteChunks, { type: 'audio/webm' });
                 var duration = Math.floor((Date.now() - _voiceNoteStartTime) / 1000);
-                
+
                 // Use existing IPFS pinning service via extension message
                 var reader = new FileReader();
                 reader.onload = function () {
                     var base64 = reader.result.split(',')[1];
-                    vscode.postMessage({ 
-                        command: 'ipfsPin', 
-                        content: base64, 
-                        name: 'voice-note-' + Date.now() + '.webm' 
+                    vscode.postMessage({
+                        command: 'ipfsPin',
+                        content: base64,
+                        name: 'voice-note-' + Date.now() + '.webm'
                     });
-                    
-                    var ipfsHandler = function(e) {
+
+                    var ipfsHandler = function (e) {
                         var msg = e.data;
                         if (msg.type === 'ipfsPinResult' && msg.success) {
                             window.removeEventListener('message', ipfsHandler);
                             var url = 'ipfs://' + msg.cid;
-                            vscode.postMessage({ 
-                                command: 'nostrSendVoiceNote', 
-                                audioUrl: url, 
-                                durationSecs: duration 
+                            vscode.postMessage({
+                                command: 'nostrSendVoiceNote',
+                                audioUrl: url,
+                                durationSecs: duration
                             });
                         }
                     };
@@ -6674,7 +6774,7 @@
                 };
                 reader.readAsDataURL(blob);
             };
-            
+
             if (_voiceNoteMediaRecorder.state !== 'inactive') {
                 _voiceNoteMediaRecorder.stop();
             }

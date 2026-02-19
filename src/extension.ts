@@ -64,9 +64,9 @@ export function startAudioWsServer(): Promise<number> {
 
 /** Stop WebSocket audio server */
 export function stopAudioWsServer(): void {
-    _audioWsClients.forEach(c => { try { c.close(); } catch {} });
+    _audioWsClients.forEach(c => { try { c.close(); } catch { } });
     _audioWsClients.clear();
-    if (_audioWss) { try { _audioWss.close(); } catch {} _audioWss = null; }
+    if (_audioWss) { try { _audioWss.close(); } catch { } _audioWss = null; }
     _audioWsPort = 0;
 }
 
@@ -103,7 +103,7 @@ export async function listAudioDevices(): Promise<string[]> {
             resolve(devices);
         });
         proc.on('error', () => resolve([]));
-        setTimeout(() => { try { proc.kill(); } catch {} }, 5000);
+        setTimeout(() => { try { proc.kill(); } catch { } }, 5000);
     });
 }
 
@@ -143,18 +143,44 @@ export async function startMicCapture(onLevel: (level: number) => void, deviceNa
                     console.log(`[Mic] ffmpeg capturing from: ${deviceName}`);
                     resolve({ success: true, device: deviceName });
                 }
-                // Compute RMS level from 16-bit PCM samples
+
+                // Create view on the buffer to access 16-bit samples
+                // Note: Modifying 'samples' modifies the underlying 'chunk' Buffer in-place
                 const samples = new Int16Array(chunk.buffer, chunk.byteOffset, Math.floor(chunk.length / 2));
+
+                // 1. Calculate RMS of the raw signal
                 let sumSq = 0;
                 for (let i = 0; i < samples.length; i++) {
                     const normalized = samples[i] / 32768;
                     sumSq += normalized * normalized;
                 }
                 const rms = Math.sqrt(sumSq / samples.length);
-                let level = Math.min(100, rms * 300 * _micSensitivity); // Scale to 0-100
-                if (level < _micNoiseGate) level = 0;
+
+                // 2. Calculate display level (0-100) based on sensitivity
+                // This simulates "post-gain" level for the gate check
+                let level = Math.min(100, rms * 300 * _micSensitivity);
+
+                // 3. Apply Gate & Gain
+                if (level < _micNoiseGate) {
+                    // Gate closed: Mute everything
+                    level = 0;
+                    chunk.fill(0);
+                } else {
+                    // Gate open: Apply gain to the actual samples
+                    if (_micSensitivity !== 1.0) {
+                        for (let i = 0; i < samples.length; i++) {
+                            let val = samples[i] * _micSensitivity;
+                            // Hard clip to 16-bit signed range
+                            if (val > 32767) val = 32767;
+                            else if (val < -32768) val = -32768;
+                            samples[i] = val;
+                        }
+                    }
+                }
+
                 if (_micLevelCallback) _micLevelCallback(level);
-                // Stream raw PCM to webview via WebSocket for peer audio
+
+                // Stream processed PCM (muted or gained) to webview
                 broadcastAudioChunk(chunk);
             });
 
@@ -198,7 +224,7 @@ export async function startMicCapture(onLevel: (level: number) => void, deviceNa
 /** Stop mic capture */
 export function stopMicCapture(): void {
     if (_ffmpegProc) {
-        try { _ffmpegProc.kill('SIGTERM'); } catch {}
+        try { _ffmpegProc.kill('SIGTERM'); } catch { }
         _ffmpegProc = null;
     }
     _micLevelCallback = null;
@@ -282,14 +308,14 @@ export function activate(context: vscode.ExtensionContext) {
 
     // GitHub — always available, auth is lazy
     githubService = new GitHubService();
-    githubService.authenticate(true).catch(() => {});
+    githubService.authenticate(true).catch(() => { });
 
     // Auto-start MCP server
     const config = vscode.workspace.getConfiguration('champion');
     if (config.get('autoStartMCP', true)) {
         mcpManager.start().then(async () => {
             // Ensure storage dir exists
-            try { await vscode.workspace.fs.createDirectory(context.globalStorageUri); } catch {}
+            try { await vscode.workspace.fs.createDirectory(context.globalStorageUri); } catch { }
             // Auto-restore FelixBag from last saved snapshot
             try {
                 await mcpManager.callTool('load_bag', { file_path: bagSnapshotPath }, { suppressActivity: true, source: 'internal' });
@@ -302,7 +328,7 @@ export function activate(context: vscode.ExtensionContext) {
                 if (mcpManager.status !== 'running') { return; }
                 try {
                     await mcpManager.callTool('save_bag', { file_path: bagSnapshotPath }, { suppressActivity: true, source: 'internal' });
-                } catch {}
+                } catch { }
             }, 5 * 60 * 1000);
             context.subscriptions.push({ dispose: () => clearInterval(bagAutoSave) });
 
