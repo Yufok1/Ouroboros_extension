@@ -2,6 +2,17 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.7.3] - 2026-02-18
+
+### Plug/Unplug System Overhaul
+- **Fixed**: Chained model plugs no longer wipe each other's loading state. Each plug operation now tracks independently — plug 3 models in sequence and all 3 show real-time progress.
+- **Fixed**: Double-clear race condition where both the activity feed and tool result handler would simultaneously clear plug state and fire duplicate `list_slots` calls.
+- **Fixed**: Backend crash when models with `trust_remote_code=True` call `sys.exit()` — `SystemExit` now caught and returned as structured error instead of killing the process.
+- **Added**: Unplug loading state — clicking UNPLUG immediately shows amber-pulse "UNPLUGGING" animation until the slot confirms empty.
+- **Added**: Rich metadata cards on plugged slot cards — author, task, downloads, likes, license, and size fetched from HuggingFace Hub and displayed as tag badges.
+- **Added**: `model_type` field in `list_slots` response for occupied slots (EMBEDDING, LLM, SEQ2SEQ, etc.).
+- **Added**: Council output panel now clears and shows "Running..." on new operations instead of displaying stale results.
+
 ## [0.7.2] - 2026-02-17
 
 ### Missing NIP UI Expansion

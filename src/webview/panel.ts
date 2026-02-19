@@ -2910,6 +2910,20 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     margin-bottom: 4px;
 }
 .slot-detail { font-size: 10px; color: var(--text-dim); }
+.slot-meta-card {
+    margin-top: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+.slot-meta-card .meta-tag {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.06);
+    color: var(--text-dim);
+    white-space: nowrap;
+}
 .slot-actions {
     margin-top: 10px;
     display: flex;

@@ -15,6 +15,8 @@
     let _userDID = '';
     let _toolSchemas = {}; // toolName -> {description, inputSchema}
     let _pluggingSlots = {}; // slot index or name -> { modelId, startTime, requestId }
+    let _unpluggingSlots = {}; // slot index -> { startTime }
+    let _slotHubInfoCache = {}; // model_source -> { author, task, downloads, likes, license, tags, size_mb }
     let _wfCatalog = [];
     let _wfSelectedId = '';
     let _wfLoadedDef = null;
@@ -840,6 +842,12 @@
         }
     }
 
+    function _formatCount(n) {
+        if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+        if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+        return String(n);
+    }
+
     function _isDefaultSlotName(name) {
         var v = String(name || '').trim().toLowerCase();
         return /^slot[_\-\s]?\d+$/.test(v) || v === 'empty' || v === 'vacant';
@@ -878,6 +886,16 @@
             }
             slotsArr = d.slots || d || [];
         } catch (err) { slotsArr = []; }
+
+        // Clear unplugging state for slots that are now confirmed empty
+        var unpKeys = Object.keys(_unpluggingSlots);
+        for (var uk = 0; uk < unpKeys.length; uk++) {
+            var ui = parseInt(unpKeys[uk]);
+            var us = slotsArr[ui];
+            if (!us || _getSlotVisualState(us) === 'empty') {
+                delete _unpluggingSlots[unpKeys[uk]];
+            }
+        }
 
         var slotCount = slotsArr.length;
         var gridTitle = document.getElementById('council-grid-title');
@@ -929,13 +947,15 @@
             var slot = slotsArr[i] || {};
             var state = _getSlotVisualState(slot);
             var isActivelyPlugging = !!pluggingBySlot[i];
-            var occupied = state === 'plugged';
+            var isActivelyUnplugging = !!_unpluggingSlots[i];
+            var occupied = state === 'plugged' && !isActivelyUnplugging;
             var plugging = state === 'plugging' || isActivelyPlugging;
-            var statusText = occupied ? 'PLUGGED' : (plugging ? 'PLUGGING' : 'EMPTY');
-            var dotClass = occupied ? 'green' : (plugging ? 'amber pulse' : 'off');
+            var unplugging = isActivelyUnplugging;
+            var statusText = unplugging ? 'UNPLUGGING' : (occupied ? 'PLUGGED' : (plugging ? 'PLUGGING' : 'EMPTY'));
+            var dotClass = unplugging ? 'amber pulse' : (occupied ? 'green' : (plugging ? 'amber pulse' : 'off'));
             var detailText = slot.model_type || slot.type || (slot.status ? ('status: ' + String(slot.status).toUpperCase()) : '--');
             var card = document.createElement('div');
-            card.className = 'slot-card state-' + state + (occupied ? ' occupied' : '') + (plugging ? ' plugging' : '');
+            card.className = 'slot-card state-' + (unplugging ? 'plugging' : state) + (occupied ? ' occupied' : '') + (plugging ? ' plugging' : '') + (unplugging ? ' plugging' : '');
 
             var html = '<div class="slot-num">' + (i + 1) + '</div>' +
                 '<div class="slot-status-line">' +
@@ -951,8 +971,23 @@
                 html += '<div class="slot-detail">' + phaseText + ' (' + elapsed + 's)</div>';
                 html += '<div class="plug-bar"><div class="plug-bar-fill"></div></div>';
             } else {
-                html += '<div class="slot-model-name">' + (slot.model_id || slot.name || 'VACANT') + '</div>';
+                var modelLabel = slot.model_source || slot.model_id || slot.name || 'VACANT';
+                html += '<div class="slot-model-name">' + escHtml(modelLabel) + '</div>';
                 html += '<div class="slot-detail">' + detailText + '</div>';
+
+                // Rich metadata card from hub_info cache
+                var hubKey = slot.model_source || slot.model_id;
+                var hubMeta = hubKey ? _slotHubInfoCache[hubKey] : null;
+                if (hubMeta && occupied) {
+                    html += '<div class="slot-meta-card">';
+                    if (hubMeta.author) html += '<span class="meta-tag">by ' + escHtml(hubMeta.author) + '</span>';
+                    if (hubMeta.task) html += '<span class="meta-tag">' + escHtml(hubMeta.task) + '</span>';
+                    if (hubMeta.license && hubMeta.license !== 'unknown') html += '<span class="meta-tag">' + escHtml(hubMeta.license) + '</span>';
+                    if (hubMeta.downloads) html += '<span class="meta-tag">' + _formatCount(hubMeta.downloads) + ' DL</span>';
+                    if (hubMeta.likes) html += '<span class="meta-tag">' + _formatCount(hubMeta.likes) + ' likes</span>';
+                    if (hubMeta.size_mb && hubMeta.size_mb > 0) html += '<span class="meta-tag">' + hubMeta.size_mb.toFixed(0) + ' MB</span>';
+                    html += '</div>';
+                }
             }
 
             if (occupied) {
@@ -966,6 +1001,18 @@
             grid.appendChild(card);
         }
 
+        // Fetch hub_info for plugged slots missing cached metadata
+        for (var fi = 0; fi < slotsArr.length; fi++) {
+            var fs = slotsArr[fi] || {};
+            var fSrc = fs.model_source || fs.model_id;
+            if (fSrc && _getSlotVisualState(fs) === 'plugged' && !_slotHubInfoCache[fSrc] && _slotHubInfoCache[fSrc] !== false) {
+                _slotHubInfoCache[fSrc] = false; // mark as fetching to prevent duplicate calls
+                (function (src) {
+                    callTool('hub_info', { model_id: src }, 'hub_info_enrich');
+                })(fSrc);
+            }
+        }
+
         // Event delegation for slot buttons
         if (!grid.dataset.actionsBound) {
             grid.addEventListener('click', function (e) {
@@ -973,7 +1020,11 @@
                 if (!btn) return;
                 var action = btn.dataset.action;
                 var slot = parseInt(btn.dataset.slot);
-                if (action === 'unplug') callTool('unplug_slot', { slot: slot });
+                if (action === 'unplug') {
+                    _unpluggingSlots[slot] = { startTime: Date.now() };
+                    if (_lastSlotsData) renderSlots(_lastSlotsData);
+                    callTool('unplug_slot', { slot: slot });
+                }
                 else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
                 else if (action === 'clone') callTool('clone_slot', { slot: slot });
             });
@@ -1009,7 +1060,25 @@
         }
     }
 
-    // Clear plugging state when plug_model/hub_plug result arrives
+    // Clear a specific plugging entry by modelId, or all if no match
+    function _clearPluggingEntry(modelId) {
+        if (modelId) {
+            var keys = Object.keys(_pluggingSlots);
+            for (var k = 0; k < keys.length; k++) {
+                var info = _pluggingSlots[keys[k]];
+                if (info && info.modelId === modelId) {
+                    delete _pluggingSlots[keys[k]];
+                    _updatePluggingUI();
+                    return;
+                }
+            }
+        }
+        // Fallback: clear all if no specific match
+        _pluggingSlots = {};
+        if (_plugTimer) { clearInterval(_plugTimer); _plugTimer = null; }
+    }
+
+    // Clear ALL plugging state (for bulk reset)
     function _clearPluggingState() {
         _pluggingSlots = {};
         if (_plugTimer) { clearInterval(_plugTimer); _plugTimer = null; }
@@ -1044,11 +1113,11 @@
             return; // Don't add progress ticks to activity log
         }
 
-        // Detect plug operations completing
+        // Detect plug operations completing — clear only the specific entry
         if (PLUG_TOOLS.indexOf(event.tool) >= 0 && event.durationMs >= 0) {
-            _clearPluggingState();
-            // Auto-refresh slots to show the newly plugged model
-            callTool('list_slots', {});
+            var completedModelId = (event.args && (event.args.model_id || event.args.summary)) || null;
+            _clearPluggingEntry(completedModelId);
+            // list_slots refresh is handled by the toolResult handler — no duplicate call here
         }
 
         _activityLog.push(event);
@@ -1151,6 +1220,11 @@
     function callTool(name, args, routeAs) {
         var id = ++_requestId;
         _pendingTools[id] = routeAs || name;
+        // Clear council output panel on new council operations for clean visual transitions
+        if (COUNCIL_TOOLS.indexOf(name) >= 0 && name !== 'list_slots') {
+            var councilOut = document.getElementById('council-output');
+            if (councilOut) councilOut.innerHTML = '<pre style="white-space:pre-wrap;color:var(--text-dim);font-size:11px;">Running ' + name + '...</pre>';
+        }
         vscode.postMessage({ command: 'callTool', tool: name, args: args || {}, id: id });
     }
     function runDiagnostic(diagKey) {
@@ -2695,6 +2769,21 @@
         var toolName = _pendingTools[msg.id] || '';
         delete _pendingTools[msg.id];
 
+        // Hub info enrichment for slot metadata cards — silent, no output
+        if (toolName === 'hub_info_enrich' && !msg.error) {
+            try {
+                var hubData = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+                if (hubData && hubData.content && hubData.content[0] && hubData.content[0].text) {
+                    hubData = JSON.parse(hubData.content[0].text);
+                }
+                if (hubData && hubData.id) {
+                    _slotHubInfoCache[hubData.id] = hubData;
+                    if (_lastSlotsData) renderSlots(_lastSlotsData);
+                }
+            } catch (e) { /* silently ignore hub_info parse failures */ }
+            return;
+        }
+
         var text = msg.error ? 'ERROR: ' + msg.error : parseToolData(msg.data);
 
         if (WORKFLOW_TOOLS.indexOf(toolName) >= 0) {
@@ -2872,7 +2961,10 @@
 
             // Keep slot cards visually in sync after mutations.
             if (['plug_model', 'hub_plug', 'unplug_slot', 'clone_slot', 'rename_slot', 'swap_slots', 'cu' + 'll_slot'].indexOf(toolName) >= 0) {
-                if (toolName === 'plug_model' || toolName === 'hub_plug') _clearPluggingState();
+                if (toolName === 'plug_model' || toolName === 'hub_plug') {
+                    var doneModelId = (msg.args && (msg.args.model_id || msg.args.summary)) || null;
+                    _clearPluggingEntry(doneModelId);
+                }
                 if (!msg.error) callTool('list_slots', {});
             }
             return;
