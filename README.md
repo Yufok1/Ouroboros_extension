@@ -116,19 +116,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.4
+## What's New in 0.7.6
 
-- **Voice Processing Overhaul** — Sensitivity and Noise Gate settings now apply real-time DSP to the audio stream, ensuring peers hear the volume changes and silence gating you configure.
-- **UX Engine Hardening** — Fixed semantic color overrides (security badges remain green regardless of theme accent) and resolved UI layout conflicts in the voice note recorder.
-
-
-
-- **FelixBag Persistence** — Semantic memory now auto-loads from `.bag_state.json` on startup and auto-saves on exit + every 5 minutes. No more ephemeral state loss on restart. Cascade chain and graph operations are also backed to disk.
-- **TUI Live Chat Fix** — Live Inference mode no longer echoes the prompt back in AI responses. All four generate sites now use token-index slicing (`outputs[0][_in_len:]`) instead of fragile string stripping. Instruct models now receive proper chat-template formatted prompts (`apply_chat_template`).
-- **Smart Loader Expansion** — New auto-routing for classifiers (`zero-shot-classification`, `text-classification`), vision-language models (`image-text-to-text`, `visual-question-answering`, `image-to-text`), and summarization/translation models. Fallback cascade ensures models always get a loader.
-- **Phantom Plugging Fix** — Slots no longer get stuck in "PLUGGING" during concurrent operations. 120s staleness timeout, backend reconciliation, and duplicate-entry prevention.
-- **Plug/Unplug Overhaul** — Independent per-slot tracking, unplug animations, rich HuggingFace metadata cards, and crash-safe model loading.
-- **Rerun Conditional Init** — Rerun bridge only initializes when `champion.tools.visualization` is enabled (defaults to off), eliminating startup noise for non-Rerun users.
+- **Council Invocation Path Fixes** — All 8 council invocation tools (`debate`, `chain`, `all_slots`, `broadcast`, `compare`, `pipe`, `invoke_slot`, `generate`) now correctly handle every model type: LLM, Embedding, SEQ2SEQ, Classifier, VLM, Vision, and Callable. Previously, several tools returned stubs, static values, or status-only responses for non-embedding models.
+- **System Prompt Injection** — Council system prompt now applied consistently across all generation paths with `apply_chat_template`. Simplified prompt removes neighbor names that confused small models into adopting wrong identities.
+- **VLM Processor Storage** — `plug_model` now stores the VLM processor on the councilor object, enabling proper multimodal invocation.
+- **Generation Quality** — `max_new_tokens` increased from 50 to 150 across broadcast/compare paths. Proper `pad_token_id` and input-length stripping eliminate echo artifacts.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

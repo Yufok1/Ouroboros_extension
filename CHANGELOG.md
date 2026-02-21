@@ -2,6 +2,28 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.7.6] - 2026-02-20
+
+### Council Invocation Path Fixes — Full Model Type Coverage
+- **Fixed**: `plug_model` now stores VLM processor (`c.processor`) on the councilor object, enabling proper VLM invocation across all tools.
+- **Fixed**: `debate` tool — non-embedding models (LLM, Classifier, Callable) were returning a static `0.5` vote instead of actual inference. All model types now produce real responses: embeddings → numeric vote, generators → text with system prompt, classifiers → label/score, callables → forward output.
+- **Fixed**: `chain` tool — generator models returned a stub message ("generation chaining not implemented") instead of actual output. Now performs real generation with system prompt injection, tokenizer handling, and proper output decoding for all model types.
+- **Fixed**: `all_slots` tool — generator, classifier, and callable models returned status-only responses instead of actual inference output. Now invokes all model types with full system prompt injection.
+- **Fixed**: `broadcast` tool — missing classifier and callable branches. Added `predict`/`classify` and `callable` dispatch. Increased `max_new_tokens` from 50 to 150.
+- **Fixed**: `compare` tool — same missing branches and short `max_new_tokens` as `broadcast`. Now matches full model type coverage.
+- **Fixed**: `pipe` tool — generator path was missing system prompt injection. Now applies `_council_system_prompt` via `apply_chat_template` when the tokenizer supports it.
+- **Fixed**: Council system prompt — `_council_system_prompt` was including neighbor slot names, which confused small models into adopting neighbor identities. Simplified to short, plain-language self-identification only.
+- **Improved**: All generation paths now use `max_new_tokens=150` (was 50 in broadcast/compare), `pad_token_id=tokenizer.eos_token_id`, and proper input-length stripping to avoid echo.
+
+## [0.7.5] - 2026-02-20
+
+### AI Onboarding — MCP Instructions & Council System Prompts
+- **Added**: MCP `instructions` field — every connecting AI client now receives a structured orientation at handshake time covering capsule identity, capability map (Workflow Engine, CASCADE tools, Diagnostics), and operational guidance. Zero discovery overhead.
+- **Added**: Live snapshot in MCP instructions — brain hash, council slot summary, FelixBag item count, and diagnostic results computed at server startup and delivered with the handshake.
+- **Added**: Council system prompt auto-injection — every plugged LLM now receives a per-slot system message identifying its name, slot index, neighbors, and consensus method. Applied across all 5 inference paths: `generate()`, `chat()`, `invoke_slot()`, `broadcast()`, and `compare_slots()`.
+- **Added**: `chat()` respects explicit `system_prompt` parameter — if the caller provides one, it takes priority over the auto-injected council prompt.
+- **Added**: MCP instructions delivered in all 3 transport modes (proxy/bus, normal/quine, HTTP recreation).
+
 ## [0.7.4] - 2026-02-19
 
 ### Voice processing overhaul
