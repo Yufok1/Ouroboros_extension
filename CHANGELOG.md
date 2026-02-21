@@ -2,6 +2,53 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.7.8] - 2026-02-21
+
+### Embedder Wiring Fixes — Observation Layer Parity
+
+Deep forensic audit identified and fixed a family of attribute name mismatches that caused the MCP observation layer to report incorrect embedder status while the system functioned correctly via fallback mechanisms.
+
+- **Fixed**: `get_embedder_info` MCP tool now correctly reports the active embedding model. Previously returned `{"embedder": null}` due to checking the non-existent `bag._embedder` attribute instead of calling `bag.get_embedder_info()`.
+- **Fixed**: `wire_bag_to_brain()` now checks `brain.embedding_foundation` (used by QuineOuroborosBrain) **before** falling back to `brain._embed_model` (used by CapsuleBrain). This eliminates the duplicate model loading (~130MB RAM saved) and establishes a proper shared embedder link.
+- **Fixed**: `FelixBag._get_embedder()` step 2 resolution now prioritizes `brain_ref.embedding_foundation` over `brain_ref._embed_model`, matching the actual attribute name on Ouroboros brains.
+- **Fixed**: NaN values in brain parameters sanitized at load time. `QuineOuroborosBrain.__init__()` now applies `np.nan_to_num()` to the decoded parameter array, cleaning ~6,140 NaN values (0.19%) from uninitialized council adapter slots. `show_weights` now reports `has_nan: false`.
+- **Root Cause**: Three naming families for the embedding model (`brain.embedding_foundation`, `brain._embed_model`, `bag._embedder`) evolved independently across the codebase. The observation/reporting tools referenced the wrong family, creating a Kleene fixed-point divergence where the system state and observation state converged to different attractors.
+
+### Technical Details
+- **Origin commit**: `8f35081` ("Fresh start - VAST rental guards, MCP tools") introduced the `_embedder` ghost attribute
+- **Backward compatible**: `_embed_model` still checked as fallback in all modified paths
+- **Impact**: Agentic workflows that queried embedder status will now receive accurate data
+
+## [0.7.7] - 2026-02-21
+
+### Workflow Engine v2.2.0 — Agent Node Type
+
+- **Added**: `agent` workflow node type — the 10th node type in the workflow engine. Plugged models now have direct, controlled access to MCP tools within workflow nodes.
+- **Added**: `_execute_agent()` handler in `WorkflowExecutor`. A plugged model is given a task and a `granted_tools` whitelist, then operates those tools in a reasoning loop (ReAct-style: reason → call tool → observe result → repeat) until it produces a `final_answer` or hits `max_iterations`.
+- **Added**: Per-node tool whitelisting. Each `agent` node declares exactly which MCP tools the model can access via `granted_tools`. The commanding agent (IDE, Claude, Cursor, etc.) controls all grants at workflow design time. Models cannot escape their sandbox.
+- **Added**: Upstream context auto-injection. Previous node outputs flow automatically into the agent's task context, enabling multi-stage pipelines where each agent node builds on prior work.
+- **Added**: Tool signature introspection in agent prompts. The model receives live-generated tool descriptions (name, parameter types, defaults, docstring) so it knows exactly how to call each granted tool.
+- **Added**: Denied tool enforcement. If the model attempts to call a tool outside its `granted_tools` list, the call is blocked, the model is notified, and execution continues — no crash.
+- **Added**: `agent_node_guide` document inducted into FelixBag at startup — full reference with schema, examples, and multi-stage pipeline pattern.
+- **Updated**: `system_shortcomings_report` in FelixBag — marked Tool Access for External Agents as RESOLVED.
+- **Updated**: All documentation surfaces updated to reflect v2.2.0 and 10 node types: `workflow_automation_guide` (FelixBag), `_build_mcp_instructions()` (MCP handshake), `get_onboarding()`, `get_quickstart()`, `get_help()`, TUI workflow help, README.md.
+- **Fixed**: Pre-existing version drift across documentation — some surfaces referenced v2.0.0/8 node types, others v2.1.0/9 node types. All now consistently report v2.2.0/10 node types.
+- **Fixed**: Node type name accuracy in README — previously listed tool names (`invoke_slot`, `bag_search`) as node types. Now correctly lists actual node types (`tool`, `agent`, `fan_out`, etc.).
+
+### Agent Node Schema
+```json
+{
+  "type": "agent",
+  "parameters": {
+    "slot": 1,
+    "task": "Search memory for X and summarize findings",
+    "granted_tools": ["bag_search", "embed_text", "get_status"],
+    "max_iterations": 5
+  }
+}
+```
+**Output keys**: `.final_answer`, `.iterations`, `.tool_calls`, `.slot`, `.name`
+
 ## [0.7.6] - 2026-02-20
 
 ### Council Invocation Path Fixes — Full Model Type Coverage
