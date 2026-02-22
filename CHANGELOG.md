@@ -4,6 +4,18 @@ All notable changes to the "Champion Council" extension will be documented in th
 
 ## [0.7.8] - 2026-02-21
 
+### Dynamic Model-Aware Token Budget
+
+Replaced 41+ hardcoded token limit constants with live values read directly from each plugged model's config at connect time. No guesswork, no truncation heuristics — the model tells us its limits and we use them.
+
+- **Added**: `_read_model_limits(model, tokenizer)` helper — extracts `max_position_embeddings`, `n_positions`, `max_sequence_length`, `model_max_length`, and `generation_config.max_new_tokens` from the model object at plug time. Reads only what the model actually reports.
+- **Updated**: All wrapper classes (`LLMWrapper`, `Seq2SeqWrapper`, `VLMWrapper`, `ClassifierWrapper`, `GenericWrapper`) now store `self._limits` at `__init__` and use `_limits.get('context_length')` for tokenizer `max_length` and `_limits.get('max_gen_tokens')` for `max_new_tokens`. Hardcoded `4096`, `512`, `256`, `150`, `100` constants eliminated.
+- **Updated**: `plug_model` (MCP tool + TUI command) now stores `c._limits` on each councilor after model attachment. Plug return JSON includes `"limits"` key with the resolved values.
+- **Updated**: All MCP council operation handlers (`generate`, `chat`, `debate`, `invoke_slot`, `compare`, `broadcast`, `chain`, `pipe`, `consensus`) now read `_lim` from the councilor before calling the model, using actual context window and generation budget.
+- **Updated**: All TUI commands (`chat`, `generate`, `pipe`, and interactive mode) use the same `_limits`-based budgets.
+- **Updated**: `vast_generate` remote GPU script now reads `model.config.max_position_embeddings` and `generation_config.max_new_tokens` on the remote GPU before running inference.
+- **Impact**: Models with small context windows (512, 1024) will no longer receive oversized inputs. Models with large context windows (32k, 128k) will no longer be artificially constrained to 256 tokens. Each model runs within the limits it actually supports.
+
 ### Embedder Wiring Fixes — Observation Layer Parity
 
 Deep forensic audit identified and fixed a family of attribute name mismatches that caused the MCP observation layer to report incorrect embedder status while the system functioned correctly via fallback mechanisms.

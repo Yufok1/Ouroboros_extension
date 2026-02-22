@@ -4,9 +4,9 @@ Local-first AI orchestration for VS Code and compatible editors. Run multi-model
 
 ## Core Features
 
-- **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Smart loader auto-detects model type (LLM, Embedding, SEQ2SEQ, Vision, VLM, Classifier) and routes to the correct loader. Rich metadata cards show model author, task, downloads, license, and size.
+- **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Smart loader auto-detects model type (LLM, Embedding, SEQ2SEQ, Vision, VLM, Classifier) and routes to the correct loader. Token budgets are read from each model's actual config (`max_position_embeddings`, `generation_config`) at plug time — no hardcoded limits. Rich metadata cards show model author, task, downloads, license, and size.
 - **140+ MCP Tools** — Full MCP/SSE tool surface for IDE agents and automation. Works with any MCP client (Claude Code, Cursor, Windsurf, etc.).
-- **Workflow Engine v2.1** — 9 node types: `invoke_slot`, `bag_search`, `hub_search`, `embed_text`, `classify`, `rerank`, `observe`, `conditional`, and `web_search`. Build DAGs with expression interpolation, conditional branching, and live execution tracing.
+- **Workflow Engine v2.2** — 10 node types: `tool` (universal MCP tool caller), `agent` (plugged model with granted tools loop), `input`, `output`, `fan_out` (parallel), `http`, `if`, `set`, `merge`, and `web_search`. Build DAGs with expression interpolation, conditional branching, agentic reasoning loops, and live execution tracing.
 - **Semantic Memory (FelixBag)** — Local embedding store with search, catalog, induction, and export. Persistent across sessions.
 - **Activity Feed** — Real-time tool call monitoring from all connected MCP clients. Click to expand full args, results, and timing. External agent activity detected via log polling across Windsurf, Cursor, VS Code, Kiro, and Antigravity.
 - **Community (Nostr)** — Decentralized marketplace, live chat, encrypted DMs, NIP-57 zaps, and privacy controls.
