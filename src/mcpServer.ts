@@ -466,7 +466,7 @@ export class MCPServerManager {
         this._sseHeartbeatTimer = setInterval(() => {
             if (this._status !== 'running') { return; }
             const elapsed = Date.now() - this._lastSseDataTime;
-            if (elapsed > MCPServerManager.SSE_HEARTBEAT_TIMEOUT_MS && this._longRunningCallActive <= 0) {
+            if (elapsed > MCPServerManager.SSE_HEARTBEAT_TIMEOUT_MS && this._longRunningCallActive <= 0 && this._pendingRequests.size === 0) {
                 console.warn(`[MCP] SSE heartbeat timeout (${Math.round(elapsed / 1000)}s no data) — triggering reconnect`);
                 this._lastSseDataTime = Date.now(); // prevent re-trigger
                 if (this._sseResponse) {

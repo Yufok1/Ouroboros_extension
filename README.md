@@ -116,12 +116,14 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.6
+## What's New in 0.7.11
 
-- **Council Invocation Path Fixes** — All 8 council invocation tools (`debate`, `chain`, `all_slots`, `broadcast`, `compare`, `pipe`, `invoke_slot`, `generate`) now correctly handle every model type: LLM, Embedding, SEQ2SEQ, Classifier, VLM, Vision, and Callable. Previously, several tools returned stubs, static values, or status-only responses for non-embedding models.
-- **System Prompt Injection** — Council system prompt now applied consistently across all generation paths with `apply_chat_template`. Simplified prompt removes neighbor names that confused small models into adopting wrong identities.
-- **VLM Processor Storage** — `plug_model` now stores the VLM processor on the councilor object, enabling proper multimodal invocation.
-- **Generation Quality** — `max_new_tokens` increased from 50 to 150 across broadcast/compare paths. Proper `pad_token_id` and input-length stripping eliminate echo artifacts.
+- **Ouroboros Pipeline Fix** — `forward`, `infer`, `deliberate` no longer crash. Added dedicated ouroboros branch with graceful fallback.
+- **Swarm Lifecycle** — `spawn_swarm` now persists the swarm so `orchestra` can find it.
+- **Clone/Cull Parity** — `clone_slot` tracks clones properly; `cull_slot` can now find and remove them.
+- **Mutation Path** — `mutate_slot` now reaches brain-level adapter/LoRA weights instead of failing on empty councilor attribute.
+- **Genesis & Identity** — `cascade_chain` genesis no longer crashes; identity reports correct generation (8, not 0).
+- **Bulk Bag Cleanup** — `bag_forget` now accepts `pattern` parameter for prefix-based bulk deletion (e.g., `"workflow_exec:*"`).
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

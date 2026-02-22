@@ -2,6 +2,51 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.7.11] - 2026-02-22
+
+### Pipeline Safety, Swarm Persistence & Council Mutation Fixes
+
+Six fixes addressing the critical ouroboros inference pipeline crash, swarm lifecycle persistence, council slot management parity, and CASCADE identity accuracy.
+
+- **Fixed**: Ouroboros 4-tier pipeline crash (B14, CRITICAL). `forward`, `infer`, and `deliberate` all crashed with "index out of range in self" because `_forward_with_internals` had no explicit `ouroboros` branch — the ouroboros brain type fell into the catch-all `else` with no error handling. Added dedicated `ouroboros` branch with try/except graceful fallback. Pipeline errors now return structured error output instead of crashing the MCP server.
+- **Fixed**: `cascade_chain` genesis operation crash (B15). `verify_lineage_to_genesis()` was called with zero arguments but requires `(chain, known_chains)`. Replaced with safe genesis info response returning genesis root, capsule hash, generation, and lineage link status.
+- **Fixed**: `spawn_swarm` → `orchestra` lifecycle (B16). The MCP `spawn_swarm` tool created the swarm but never stored it on `agent._swarm`. The `orchestra` tool then found no swarm. Added `agent._swarm = swarm` assignment in both the `spawn_swarm` and `replicate` fallback paths.
+- **Fixed**: `clone_slot` / `cull_slot` parity (B17). The MCP `clone_slot` tool copied model references to empty council slots but never tracked them in `source._clones`. The `cull_slot` tool read `_clones` and always found it empty. Now initializes `_clones` list on source and appends target slot indices during cloning.
+- **Fixed**: `mutate_slot` adapter resolution (B18). Checked `councilor.adapter` which doesn't exist on `QuineSlot` objects — always returned "no adapter to mutate". Now falls through to check brain-level adapter weights (`adapter_in`, `adapter_out`, `lora_A`, `lora_B`, etc.) on the inner `_brain` object when councilor-level adapter is absent.
+- **Fixed**: CASCADE identity generation number (B19). `cascade_chain(operation='identity')` reported `generation: 0` because it read `_BRAIN_CONFIG.get('generation', 0)` — but `_BRAIN_CONFIG` has no `generation` key. Changed to read `_GENERATION` directly (value: 8).
+- **Enhanced**: `bag_forget` now supports pattern-based bulk deletion via `pattern` parameter. Pass a prefix with trailing `*` (e.g., `"workflow_exec:*"`) to delete all matching items in one call. Returns count of deleted items. Works across all 5 parity points (MCP, SSE, TUI, FelixBag class, HTTP).
+
+## [0.7.10] - 2026-02-22
+
+### Agent Parity, SSE Resilience & Operational Hardening
+
+Ten fixes addressing SSE connection stability, agent instruction parity with MCP clients, workflow schema documentation, and operational reliability across CASCADE, Hub, and metrics facilities.
+
+- **Fixed**: SSE heartbeat no longer kills in-flight requests. Added `_pendingRequests.size === 0` guard — heartbeat timeout only fires when there is genuinely zero activity (no pending requests AND no SSE data for 60s). Previously, long model operations (>60s) triggered false disconnects that destroyed all pending requests.
+- **Added**: Dynamic agent instruction parity (B13). `_execute_agent` now assembles context blocks scoped to each agent node's `granted_tools` — 8 categories (FelixBag, CASCADE, Inference, Council, Workflows, HuggingFace, Diagnostics, Status) plus slot identity. Plugged models receive the same operational understanding as external MCP clients, proportional to their granted capabilities.
+- **Fixed**: Workflow schema documentation rewritten with correct node formats. Tool nodes use top-level `tool_name` (not inside parameters), if-nodes use `conditions` array with `then`/`else` and `branch` connections (not `condition`), fan_out uses top-level `targets` array.
+- **Fixed**: Workflow engine version string `"2.1.0"` → `"2.2.0"` matching documentation.
+- **Fixed**: `get_capabilities` manifest expanded from 13 to 28 capabilities, covering workflows, classify, rerank, generate, batch, CASCADE, diagnostics, and hub operations.
+- **Fixed**: Slot pre-flight validation now uses per-slot `slot_info(slot)` calls instead of `list_slots` (whose truncated/cached output lost the `slots` array). Each referenced agent slot is checked individually — small response, no truncation risk.
+- **Fixed**: CASCADE `identity` operation returns capsule-native data (quine hash, generation, brain type, integrity) instead of failing external import.
+- **Fixed**: `classify` tool returns both `"output"` (canonical) and `"classification"` (legacy) keys for backward compatibility with existing workflows.
+- **Fixed**: `hub_info` size calculation uses safetensors metadata first, then `files_metadata=True` fallback, resolving `size_mb: 0.0` bug.
+- **Fixed**: `metrics_analyze` replaced broken CASCADE import with native IQR anomaly detection, category inference from metric names, and health classification (healthy/unstable/warning/critical).
+
+## [0.7.9] - 2026-02-21
+
+### Workflow Engine Hardening — Agent Node & Execution Reliability
+
+Six targeted fixes to the workflow execution engine, addressing the critical agent node conversation format bug and adding timeout/validation infrastructure for production workflow pipelines.
+
+- **Fixed**: Agent node conversation format — `_execute_agent` now builds structured message lists (`[{"role": "system", ...}, {"role": "user", ...}]`) instead of flat string concatenation. Models receive proper chat template formatting via `apply_chat_template`, producing correct `{"final_answer": ...}` responses instead of infinite tool-call loops.
+- **Fixed**: `invoke_slot` now accepts a `messages` parameter for caller-provided structured conversations. When provided, messages are passed directly to `apply_chat_template` instead of wrapping text in a default system/user pair.
+- **Fixed**: `invoke_slot` now accepts a `max_tokens` parameter, allowing agent nodes and workflows to control generation budget per invocation. Previously hardcoded to the model's default `max_gen_tokens`.
+- **Fixed**: `classify` MCP tool return key changed from `"classification"` to `"output"`, matching the key used by all other tool handlers (`invoke_slot`, `generate`, `compare`). Downstream workflows and agent nodes that parse tool results by the `"output"` key now receive classify results correctly.
+- **Fixed**: Bus call timeout increased from 30s to 120s (both MCP and TUI paths). Complex workflows with multiple model invocations no longer hit false timeout failures during legitimate long-running operations.
+- **Added**: Slot pre-flight validation in `WorkflowExecutor`. Before DAG execution begins, agent nodes referencing empty slots are caught with a clear error message (`"Slot N is empty - plug a model before running this workflow"`) instead of failing deep in the execution stack.
+- **Added**: Per-node timeout with `ThreadPoolExecutor`. Each workflow node can specify a `timeout` parameter (default 300s). Nodes that exceed their timeout are cleanly terminated with a `TimeoutError` that respects the node's `on_error` policy (retry/skip/fail). Previously, hung nodes blocked the entire workflow indefinitely.
+
 ## [0.7.8] - 2026-02-21
 
 ### Dynamic Model-Aware Token Budget
