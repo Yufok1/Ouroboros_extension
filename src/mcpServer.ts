@@ -145,6 +145,8 @@ export class MCPServerManager {
     private _mcpLogPath: string = '';
     private _mcpLogOffset: number = 0;
     private _mcpLogRemainder: string = '';
+    private _mcpLogCapsuleHint?: string;
+    private _mcpLogResolveCount: number = 0;
     private _mcpLogPollTimer: ReturnType<typeof setInterval> | null = null;
     private _recentLocalToolCalls: Array<{ tool: string; timestamp: number; dedupeWindowMs: number }> = [];
     // Marathon-session hardening: SSE heartbeat, auto-restart, periodic cache cleanup
@@ -617,8 +619,10 @@ export class MCPServerManager {
 
     private startMcpLogPolling(capsulePathHint?: string) {
         this.stopMcpLogPolling();
+        this._mcpLogCapsuleHint = capsulePathHint;
         this._mcpLogPath = this.resolveMcpLogPath(capsulePathHint);
         this._mcpLogRemainder = '';
+        this._mcpLogResolveCount = 0;
 
         try {
             const stat = fs.statSync(this._mcpLogPath);
@@ -631,6 +635,23 @@ export class MCPServerManager {
         }
 
         this._mcpLogPollTimer = setInterval(() => {
+            // Re-resolve log path periodically in case the MCP server started
+            // writing to a different location (e.g. globalStorage extraction dir)
+            // after the initial resolve picked a stale file.
+            if (this._mcpLogResolveCount < 20) {
+                this._mcpLogResolveCount++;
+                const freshPath = this.resolveMcpLogPath(this._mcpLogCapsuleHint);
+                if (freshPath !== this._mcpLogPath) {
+                    console.log(`[MCP] Log path re-resolved: ${freshPath}`);
+                    this._mcpLogPath = freshPath;
+                    this._mcpLogOffset = 0;
+                    this._mcpLogRemainder = '';
+                    try {
+                        const stat = fs.statSync(freshPath);
+                        this._mcpLogOffset = stat.size;
+                    } catch { /* file may not exist yet */ }
+                }
+            }
             this.pollMcpLogForActivity().catch((err) => {
                 console.error('[MCP] Log poll error:', err?.message || err);
             });

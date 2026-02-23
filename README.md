@@ -116,14 +116,13 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.11
+## What's New in 0.7.14
 
-- **Ouroboros Pipeline Fix** — `forward`, `infer`, `deliberate` no longer crash. Added dedicated ouroboros branch with graceful fallback.
-- **Swarm Lifecycle** — `spawn_swarm` now persists the swarm so `orchestra` can find it.
-- **Clone/Cull Parity** — `clone_slot` tracks clones properly; `cull_slot` can now find and remove them.
-- **Mutation Path** — `mutate_slot` now reaches brain-level adapter/LoRA weights instead of failing on empty councilor attribute.
-- **Genesis & Identity** — `cascade_chain` genesis no longer crashes; identity reports correct generation (8, not 0).
-- **Bulk Bag Cleanup** — `bag_forget` now accepts `pattern` parameter for prefix-based bulk deletion (e.g., `"workflow_exec:*"`).
+- **RSSM Imagination Rewrite** — Both DreamerBrain and EmbeddedDreamerBrain now use single-step RSSM calls instead of batch `nj.scan`. Fixes ninjax `create=False` state key crashes. Imagine-path keys (prior0, prior0norm, priorlogit) merged at init time.
+- **Compact Imagine Output** — The `imagine` MCP tool now returns a trajectory summary (latent_norm, stoch_std, norm_trend) instead of serializing full numpy arrays. Prevents 614KB context bombs in MCP clients.
+- **Live Training Metrics** — `get_status` reads dynamic `_fitness` from the brain. `feed()` returns per-transition observation data. `session_stats` includes buffer size.
+- **Forward Pass RSSM Update** — `forward()` now calls `_update_rssm_state()` on every pass, building latent from real RSSM deter+stoch instead of LoRA output alone.
+- **Float32 Imagination** — Carry dtype changed from bfloat16 to float32 throughout imagination paths. Eliminates silent precision loss in trajectory value computation.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

@@ -76,3 +76,14 @@ quine_source.pdf
 vsix_extracted/
 vscode-extension/
 workflows/
+
+# Runtime state files
+.capsule_state.json
+.relay_center.cmd
+.slot_manifest.json
+.signal_intake.json
+tui.log
+nul
+write_test.txt
+plans/test_write.txt
+INTELLIGENCE_REPORT.md
