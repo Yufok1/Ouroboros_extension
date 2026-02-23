@@ -2,6 +2,53 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.8.0] - 2026-02-23
+
+### DreamerV3 Full Integration — Critic, Rewards, Training & Display
+
+Major release wiring the complete DreamerV3 learning loop: reward signal capture from live MCP operations, critic/reward/continue heads for value estimation, 4-phase gradient-free training, branching imagination with per-action trajectories, and a sidebar dreamer widget with diagnostics display. All dreamer parameters are config-driven via `dreamer_config.json` with runtime hot-reload.
+
+**Critic & Value Heads (3 new modules)**
+- **CriticHead**: MLP (5120->256->256->1) with SiLU activation and EMA target network for TD learning. ~1.4M params. Serializable via base64+gzip for state persistence.
+- **RewardHead**: MLP (5120->128->1) predicts reward from latent state during imagination rollouts.
+- **ContinueHead**: MLP (5120->64->1) with sigmoid output predicts episode continuation probability.
+
+**Reward Signal Capture (6 hook points)**
+- Tool success/failure in `logged_tool()` decorator
+- HOLD protocol accept/override in `yield_point()`
+- FelixBag `bag_induct` and `bag_forget` operations
+- Workflow execution success/failure and workflow creation
+- All rewards are config-weighted, symlog-normalized (optional), and paired with latent state vectors for critic training.
+
+**4-Phase Training Loop**
+- Phase 1: World model perturbation (gradient-free evolutionary)
+- Phase 1b: Reward head training on buffer
+- Phase 2: Imagination rollout with reward/critic prediction per step
+- Phase 3: Critic update with TD error and EMA target sync
+- Phase 4: Actor update via LoRA perturbation guided by lambda-return advantage
+- Timeout budget enforced between phases for pipeline safety.
+
+**Branching Imagination**
+- `imagine()` now takes `n_actions` parameter for multi-branch rollouts
+- Each action gets isolated trajectory with `nj_state` deep-copied per branch
+- Full state save/restore (deter, stoch, nj_state) around imagination
+- Results stored in `_last_imagination` for critic evaluation
+
+**Config-Driven Parameters**
+- `dreamer_config.json` controls all reward weights, training hyperparameters, imagination settings, buffer sizes, and architecture dimensions
+- Hot-reload on every `show_rssm` call — tune at runtime without restart
+- Deep merge with built-in defaults for forward compatibility
+
+**Enriched MCP Tool Responses (zero new tools)**
+- `get_status`: Added `dreamer` section (fitness, critic_value, reward_count, training_cycles, buffer sizes, reward_rate, imagination_branches)
+- `show_rssm`: Added full dreamer diagnostics (critic value/target/params/history, reward stats, training metrics, full config dump)
+- `imagine`: Added per-step `critic_value`, `pred_reward`, `action` fields and branch count
+
+**Extension UI**
+- Sidebar dreamer widget in Control Panel with status polling
+- Diagnostics tab with imagination trigger and config editor
+- Dreamer status/config message handlers in extension host
+
 ## [0.7.14] - 2026-02-22
 
 ### RSSM Imagination Rewrite — Single-Step Architecture

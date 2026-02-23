@@ -330,6 +330,34 @@ export class CouncilPanel {
             case 'openSettings':
                 vscode.commands.executeCommand('workbench.action.openSettings', 'champion');
                 break;
+            case 'saveDreamerConfig': {
+                const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                const configPath = path.join(wsFolder, 'dreamer_config.json');
+                try {
+                    fs.writeFileSync(configPath, JSON.stringify(msg.config, null, 2));
+                } catch { /* best effort */ }
+                break;
+            }
+            case 'resetDreamerConfig': {
+                const wsFolder2 = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                const resetPath = path.join(wsFolder2, 'dreamer_config.json');
+                try {
+                    if (fs.existsSync(resetPath)) { fs.unlinkSync(resetPath); }
+                } catch { /* best effort */ }
+                break;
+            }
+            case 'loadDreamerConfigFile': {
+                const wsFolder3 = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                const cfgPath = path.join(wsFolder3, 'dreamer_config.json');
+                try {
+                    if (fs.existsSync(cfgPath)) {
+                        const content = fs.readFileSync(cfgPath, 'utf-8');
+                        const config = JSON.parse(content);
+                        this.send({ type: 'dreamerConfigLoaded', config });
+                    }
+                } catch { /* best effort */ }
+                break;
+            }
             // ── NOSTR COMMANDS ──
             case 'nostrGetIdentity': {
                 if (this.nostr) {
@@ -4711,6 +4739,44 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <button class="btn-dim" onclick="runDiagnostic('save_state')">SAVE STATE</button>
         <button class="btn-dim" onclick="runDiagnostic('demo')">RUN DEMO</button>
     </div>
+    <div class="section-head" style="margin-top:20px;">DREAMER WORLD MODEL</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        <button onclick="runDiagnostic('show_rssm')">RSSM + DREAMER</button>
+        <button onclick="runImagination()">IMAGINATION</button>
+    </div>
+
+    <div class="section-head" style="margin-top:20px; cursor: pointer; display:flex; align-items:center; justify-content:space-between; padding:8px 10px; border:1px solid var(--vscode-panel-border); border-radius:4px; background:rgba(255,255,255,0.03);" onclick="toggleDreamerConfig()">
+        <span>DREAMER CONFIG</span>
+        <span id="dreamer-config-arrow" style="font-size:13px;">&#x25BC;</span>
+    </div>
+    <div id="dreamer-config-panel" style="display:none; padding: 12px; font-size: 11px; border:1px solid var(--vscode-panel-border); border-top:none; border-radius:0 0 4px 4px;">
+        <div style="margin-bottom: 16px;">
+            <div style="font-weight: bold; margin-bottom: 6px; padding:4px 8px; background:rgba(255,255,255,0.04); border-left:2px solid var(--vscode-charts-blue); font-size:10px; text-transform:uppercase; letter-spacing:1px;">REWARD WEIGHTS</div>
+            <div id="reward-config-fields" style="padding:4px 8px;"></div>
+        </div>
+        <div style="margin-bottom: 16px;">
+            <div style="font-weight: bold; margin-bottom: 6px; padding:4px 8px; background:rgba(255,255,255,0.04); border-left:2px solid var(--vscode-charts-green); font-size:10px; text-transform:uppercase; letter-spacing:1px;">TRAINING</div>
+            <div id="training-config-fields" style="padding:4px 8px;"></div>
+        </div>
+        <div style="margin-bottom: 16px;">
+            <div style="font-weight: bold; margin-bottom: 6px; padding:4px 8px; background:rgba(255,255,255,0.04); border-left:2px solid var(--vscode-charts-yellow); font-size:10px; text-transform:uppercase; letter-spacing:1px;">IMAGINATION</div>
+            <div id="imagination-config-fields" style="padding:4px 8px;"></div>
+        </div>
+        <div style="margin-bottom: 16px;">
+            <div style="font-weight: bold; margin-bottom: 6px; padding:4px 8px; background:rgba(255,255,255,0.04); border-left:2px solid var(--vscode-charts-orange); font-size:10px; text-transform:uppercase; letter-spacing:1px;">BUFFERS</div>
+            <div id="buffer-config-fields" style="padding:4px 8px;"></div>
+        </div>
+        <div style="margin-bottom: 16px;">
+            <div style="font-weight: bold; margin-bottom: 6px; padding:4px 8px; background:rgba(255,255,255,0.04); border-left:2px solid var(--vscode-charts-purple); font-size:10px; text-transform:uppercase; letter-spacing:1px;">ARCHITECTURE (read-only)</div>
+            <div id="arch-config-fields" style="padding:4px 8px;"></div>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: 12px;">
+            <button onclick="saveDreamerConfig()" style="flex:1;">Save Config</button>
+            <button onclick="resetDreamerConfig()" style="flex:1; opacity: 0.7;">Reset Defaults</button>
+        </div>
+        <div id="config-save-status" style="font-size: 10px; opacity: 0.7; margin-top: 4px;"></div>
+    </div>
+
     <div class="section-head" style="margin-top:20px;">CASCADE LATTICE</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
         <button onclick="runDiagnostic('cascade_graph_stats')">GRAPH STATS</button>

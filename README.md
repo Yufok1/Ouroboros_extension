@@ -116,13 +116,14 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.7.14
+## What's New in 0.8.0
 
-- **RSSM Imagination Rewrite** — Both DreamerBrain and EmbeddedDreamerBrain now use single-step RSSM calls instead of batch `nj.scan`. Fixes ninjax `create=False` state key crashes. Imagine-path keys (prior0, prior0norm, priorlogit) merged at init time.
-- **Compact Imagine Output** — The `imagine` MCP tool now returns a trajectory summary (latent_norm, stoch_std, norm_trend) instead of serializing full numpy arrays. Prevents 614KB context bombs in MCP clients.
-- **Live Training Metrics** — `get_status` reads dynamic `_fitness` from the brain. `feed()` returns per-transition observation data. `session_stats` includes buffer size.
-- **Forward Pass RSSM Update** — `forward()` now calls `_update_rssm_state()` on every pass, building latent from real RSSM deter+stoch instead of LoRA output alone.
-- **Float32 Imagination** — Carry dtype changed from bfloat16 to float32 throughout imagination paths. Eliminates silent precision loss in trajectory value computation.
+- **DreamerV3 Full Integration** — Complete learning loop: reward capture from live MCP operations, critic/reward/continue value heads, 4-phase gradient-free training, and branching imagination with per-action trajectories.
+- **Critic Head** — MLP (5120->256->256->1, ~1.4M params) with EMA target network for TD learning. Predicts value of latent states during imagination rollouts.
+- **Reward Signal Capture** — 6 hook points across tool calls, HOLD decisions, FelixBag operations, and workflow execution. All rewards config-weighted and symlog-normalized.
+- **Config-Driven** — `dreamer_config.json` controls all hyperparameters with runtime hot-reload. Tune reward weights, training frequency, imagination horizon without restart.
+- **Enriched Tool Responses** — `get_status`, `show_rssm`, and `imagine` now return dreamer diagnostics (critic values, reward stats, training metrics) with zero new MCP tools.
+- **Sidebar Dreamer Widget** — Extension UI shows dreamer status, imagination trigger, and config editor in the diagnostics tab.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import { WebSocketServer, WebSocket as WsWebSocket } from 'ws';
 import { MCPServerManager, TOOL_CATEGORIES } from './mcpServer';
@@ -585,6 +586,100 @@ export function activate(context: vscode.ExtensionContext) {
   <div style="margin-top:12px;font-size:11px;opacity:0.8;">
     If this panel looks stale, close and reopen the Champion sidebar view.
   </div>
+
+  <div id="dreamer-section" style="border-top: 1px solid var(--vscode-panel-border); margin-top: 12px; padding-top: 8px;">
+    <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px;">
+      <span style="font-weight: bold; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;">Dreamer</span>
+      <span id="dreamer-dot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-charts-yellow); display: inline-block;"></span>
+    </div>
+    <div style="font-size: 11px; line-height: 1.6; font-family: var(--vscode-editor-font-family);">
+      <div style="display: flex; justify-content: space-between;"><span style="opacity: 0.7;">Value</span><span id="dreamer-value" style="font-variant-numeric: tabular-nums;">\u2014</span></div>
+      <div id="dreamer-value-bar" style="height: 3px; background: var(--vscode-progressBar-background); border-radius: 2px; margin: 2px 0 4px;">
+        <div id="dreamer-value-fill" style="height: 100%; width: 0%; background: var(--vscode-charts-blue); border-radius: 2px; transition: width 0.3s;"></div>
+      </div>
+      <div style="display: flex; justify-content: space-between;"><span style="opacity: 0.7;">Fitness</span><span id="dreamer-fitness">\u2014</span></div>
+      <div style="display: flex; justify-content: space-between;"><span style="opacity: 0.7;">Buffer</span><span id="dreamer-buffer">\u2014</span></div>
+      <div style="display: flex; justify-content: space-between;"><span style="opacity: 0.7;">Rewards</span><span id="dreamer-rewards">\u2014</span></div>
+    </div>
+    <div id="dreamer-imagination" style="margin-top: 8px; display: none;">
+      <div style="font-size: 10px; opacity: 0.7; text-transform: uppercase; margin-bottom: 4px;">Imagination</div>
+      <div id="dreamer-action-bars" style="font-size: 10px; font-family: var(--vscode-editor-font-family); line-height: 1.5;"></div>
+    </div>
+    <div style="margin-top: 8px; font-size: 10px;">
+      <div style="display: flex; justify-content: space-between; opacity: 0.7;">
+        <span>Training: <span id="dreamer-train-count">0</span> cycles</span>
+        <span id="dreamer-train-status"></span>
+      </div>
+    </div>
+    <div style="margin-top: 8px; display: flex; gap: 4px;">
+      <button id="btn-imagine" style="flex: 1; padding: 3px 8px; font-size: 10px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; cursor: pointer; border-radius: 2px;">Imagine</button>
+      <button id="btn-train" style="flex: 1; padding: 3px 8px; font-size: 10px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; cursor: pointer; border-radius: 2px;">Train</button>
+    </div>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+
+    function updateDreamerDisplay(data) {
+      if (!data || data.error) {
+        document.getElementById('dreamer-dot').style.background = 'var(--vscode-charts-red)';
+        return;
+      }
+      document.getElementById('dreamer-dot').style.background = data.active ? 'var(--vscode-charts-green)' : 'var(--vscode-charts-yellow)';
+      const value = data.critic_value ?? 0;
+      document.getElementById('dreamer-value').textContent = value.toFixed(3) + (value > 0 ? ' \\u25B2' : value < 0 ? ' \\u25BC' : '');
+      const valuePct = Math.max(0, Math.min(100, (value + 1) * 50));
+      document.getElementById('dreamer-value-fill').style.width = valuePct + '%';
+      document.getElementById('dreamer-fitness').textContent = (data.fitness ?? 0).toFixed(3);
+      document.getElementById('dreamer-buffer').textContent = (data.obs_buffer_size ?? 0) + ' / ' + (data.reward_buffer_size ?? 0);
+      const rr = data.reward_rate ?? 0;
+      document.getElementById('dreamer-rewards').textContent = '+' + (data.reward_count ?? 0) + ' (' + rr + '/min)';
+
+      const imgData = data.last_imagination;
+      if (imgData && imgData.action_values && imgData.action_values.length > 0) {
+        document.getElementById('dreamer-imagination').style.display = 'block';
+        const barsEl = document.getElementById('dreamer-action-bars');
+        const maxVal = Math.max(...imgData.action_values.map(Math.abs), 0.01);
+        let html = '';
+        imgData.action_values.forEach((v, i) => {
+          const pct = Math.max(0, Math.min(100, (v / maxVal) * 100));
+          const isBest = i === imgData.best_action;
+          const color = isBest ? 'var(--vscode-charts-green)' : 'var(--vscode-charts-blue)';
+          html += '<div style="display:flex;align-items:center;gap:4px;">';
+          html += '<span style="width:12px;' + (isBest ? 'color:var(--vscode-charts-green);' : 'opacity:0.5;') + '">' + (isBest ? '\\u25BA' : ' ') + i + '</span>';
+          html += '<div style="flex:1;height:6px;background:var(--vscode-progressBar-background);border-radius:2px;">';
+          html += '<div style="width:' + pct + '%;height:100%;background:' + color + ';border-radius:2px;transition:width 0.3s;"></div>';
+          html += '</div>';
+          html += '<span style="width:36px;text-align:right;">' + v.toFixed(2) + '</span>';
+          html += '</div>';
+        });
+        barsEl.innerHTML = html;
+      } else {
+        document.getElementById('dreamer-imagination').style.display = 'none';
+      }
+
+      document.getElementById('dreamer-train-count').textContent = data.training_cycles ?? 0;
+      const lastTrain = data.last_train;
+      if (lastTrain && lastTrain.accepted !== undefined) {
+        const el = document.getElementById('dreamer-train-status');
+        el.textContent = lastTrain.accepted ? '\\u2713' : '\\u2717';
+        el.style.color = lastTrain.accepted ? 'var(--vscode-charts-green)' : 'var(--vscode-charts-red)';
+      }
+    }
+
+    document.getElementById('btn-imagine').addEventListener('click', () => {
+      vscode.postMessage({ command: 'callTool', tool: 'imagine', args: { scenario: 'current state projection', steps: 15 } });
+    });
+    document.getElementById('btn-train').addEventListener('click', () => {
+      vscode.postMessage({ command: 'callTool', tool: 'show_rssm', args: {} });
+    });
+
+    window.addEventListener('message', event => {
+      if (event.data.type === 'dreamerStatus') { updateDreamerDisplay(event.data.data); }
+    });
+
+    setInterval(() => { vscode.postMessage({ command: 'dreamerStatus' }); }, 5000);
+  </script>
 </body>
 </html>`;
     };
@@ -594,10 +689,52 @@ export function activate(context: vscode.ExtensionContext) {
             resolveWebviewView(webviewView: vscode.WebviewView) {
                 sidebarView = webviewView;
                 webviewView.webview.options = {
-                    enableScripts: false,
+                    enableScripts: true,
                     enableCommandUris: true
                 };
                 renderSidebarView(webviewView);
+
+                // Dreamer sidebar message handler
+                webviewView.webview.onDidReceiveMessage(async (message: any) => {
+                    switch (message.command) {
+                        case 'dreamerStatus':
+                            if (mcpManager && mcpManager.status === 'running') {
+                                try {
+                                    const raw = await mcpManager.callTool('get_status', {}, { suppressActivity: true, source: 'internal' });
+                                    const text = raw?.content?.[0]?.text || (typeof raw === 'string' ? raw : '{}');
+                                    const parsed = JSON.parse(text);
+                                    webviewView.webview.postMessage({ type: 'dreamerStatus', data: parsed.dreamer || { active: false } });
+                                } catch {
+                                    webviewView.webview.postMessage({ type: 'dreamerStatus', data: { error: 'not available' } });
+                                }
+                            }
+                            break;
+                        case 'callTool':
+                            if (mcpManager && mcpManager.status === 'running') {
+                                try {
+                                    await mcpManager.callTool(message.tool, message.args || {}, { source: 'extension' });
+                                } catch { /* best effort */ }
+                            }
+                            break;
+                        case 'saveDreamerConfig': {
+                            const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                            const configPath = path.join(wsFolder, 'dreamer_config.json');
+                            try {
+                                fs.writeFileSync(configPath, JSON.stringify(message.config, null, 2));
+                            } catch { /* best effort */ }
+                            break;
+                        }
+                        case 'resetDreamerConfig': {
+                            const wsFolder2 = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                            const resetPath = path.join(wsFolder2, 'dreamer_config.json');
+                            try {
+                                if (fs.existsSync(resetPath)) { fs.unlinkSync(resetPath); }
+                            } catch { /* best effort */ }
+                            break;
+                        }
+                    }
+                });
+
                 webviewView.onDidDispose(() => {
                     if (sidebarView === webviewView) {
                         sidebarView = undefined;

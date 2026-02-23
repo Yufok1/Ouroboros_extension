@@ -466,6 +466,9 @@
                 case 'toolResult':
                     handleToolResult(msg);
                     break;
+                case 'dreamerConfigLoaded':
+                    if (msg.config) { renderDreamerConfig(msg.config); }
+                    break;
                 case 'nostrEvent':
                     handleNostrEvent(msg.event);
                     break;
@@ -1537,6 +1540,25 @@
                 try { normalized = JSON.parse(payload); } catch (e) { normalized = { raw: payload }; }
             }
 
+            // Route imagination results to custom renderer
+            if (diagKey === '_imagination') {
+                var imgResolved = normalized.resolved || normalized;
+                diagOut.innerHTML = renderImaginationResult(imgResolved);
+                return;
+            }
+
+            // Route config load — extract dreamer.config from show_rssm response
+            if (diagKey === '_dreamer_config_load') {
+                var configResolved = normalized.resolved || normalized;
+                if (configResolved && configResolved.dreamer && configResolved.dreamer.config) {
+                    renderDreamerConfig(configResolved.dreamer.config);
+                } else {
+                    // Fallback: try to load from the raw data (pre-enrichment, show_rssm won't have dreamer yet)
+                    vscode.postMessage({ command: 'loadDreamerConfigFile' });
+                }
+                return;
+            }
+
             var output = {
                 diagnostic: normalized.label || diagKey,
                 key: normalized.key || diagKey,
@@ -1555,6 +1577,187 @@
     // Expose globally for onclick handlers
     window.callTool = callTool;
     window.runDiagnostic = runDiagnostic;
+
+    // ═══════════════ DREAMER UI FUNCTIONS ═══════════════
+
+    function runImagination() {
+        var diagOut = document.getElementById('diag-output');
+        if (diagOut) { diagOut.innerHTML = '<div class="diag-shell"><div class="diag-empty">Imagining...</div></div>'; }
+        var id = ++_requestId;
+        _pendingDiagnostics[id] = '_imagination';
+        vscode.postMessage({ command: 'callTool', tool: 'imagine', args: { scenario: 'current state', steps: 15 }, id: id });
+    }
+
+    function renderImaginationResult(data) {
+        var trajectories = data.trajectories || data;
+        if (!Array.isArray(trajectories) || trajectories.length === 0) {
+            return '<div class="diag-shell"><pre style="white-space:pre-wrap;font-size:11px;">' + _diagPretty(data, 50000) + '</pre></div>';
+        }
+        var numTrajs = trajectories.length;
+        var horizon = (trajectories[0] && trajectories[0].length) || 0;
+        var html = '<div class="diag-shell"><h3 style="margin:0 0 8px;">IMAGINATION &mdash; ' + numTrajs + ' branches &times; ' + horizon + ' steps</h3>';
+
+        var branchValues = trajectories.map(function(traj, i) {
+            var totalValue = 0;
+            for (var j = 0; j < traj.length; j++) { totalValue += (traj[j].critic_value || 0); }
+            return { action: i, value: totalValue, traj: traj };
+        });
+        branchValues.sort(function(a, b) { return b.value - a.value; });
+
+        var bestAction = branchValues[0] ? branchValues[0].action : 0;
+        html += '<div style="margin-bottom:12px;">';
+        html += '<div>Best action: <strong>' + bestAction + '</strong> (value: ' + (branchValues[0] ? branchValues[0].value.toFixed(3) : '0') + ')</div>';
+        html += '</div>';
+
+        html += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+        html += '<tr style="border-bottom:1px solid var(--vscode-panel-border);">';
+        html += '<th style="text-align:left;padding:4px;">Act</th><th style="text-align:left;padding:4px;">Value</th><th style="text-align:left;padding:4px;">Bar</th><th style="text-align:left;padding:4px;">Trajectory</th></tr>';
+
+        var maxVal = 0.01;
+        for (var k = 0; k < branchValues.length; k++) {
+            if (Math.abs(branchValues[k].value) > maxVal) { maxVal = Math.abs(branchValues[k].value); }
+        }
+
+        for (var rank = 0; rank < branchValues.length; rank++) {
+            var branch = branchValues[rank];
+            var pct = Math.max(0, (branch.value / maxVal) * 100);
+            var isBest = rank === 0;
+            var color = isBest ? '#4CAF50' : '#2196F3';
+            html += '<tr style="border-bottom:1px solid var(--vscode-panel-border);opacity:' + (1 - rank * 0.08) + ';">';
+            html += '<td style="padding:4px;">' + (isBest ? '\u25BA ' : '  ') + branch.action + '</td>';
+            html += '<td style="padding:4px;font-variant-numeric:tabular-nums;">' + branch.value.toFixed(3) + '</td>';
+            html += '<td style="padding:4px;width:40%;"><div style="height:8px;background:var(--vscode-progressBar-background);border-radius:3px;">';
+            html += '<div style="width:' + pct + '%;height:100%;background:' + color + ';border-radius:3px;"></div></div></td>';
+            var norms = branch.traj.map(function(s) { return s.latent_norm || 0; });
+            var maxNorm = 0.01;
+            for (var m = 0; m < norms.length; m++) { if (norms[m] > maxNorm) maxNorm = norms[m]; }
+            var blocks = ['\u2581','\u2582','\u2583','\u2584','\u2585','\u2586','\u2587','\u2588'];
+            var sparkline = norms.map(function(n) { var h = Math.round((n / maxNorm) * 7); return blocks[Math.min(h, 7)]; }).join('');
+            html += '<td style="padding:4px;font-size:10px;letter-spacing:-1px;">' + sparkline + '</td>';
+            html += '</tr>';
+        }
+        html += '</table></div>';
+        return html;
+    }
+
+    var _dreamerConfig = null;
+
+    function toggleDreamerConfig() {
+        var panel = document.getElementById('dreamer-config-panel');
+        var arrow = document.getElementById('dreamer-config-arrow');
+        if (!panel) return;
+        var isHidden = panel.style.display === 'none';
+        panel.style.display = isHidden ? 'block' : 'none';
+        if (arrow) arrow.textContent = isHidden ? '\u25B2' : '\u25BC';
+        if (isHidden && !_dreamerConfig) { loadDreamerConfig(); }
+    }
+
+    function loadDreamerConfig() {
+        var id = ++_requestId;
+        _pendingDiagnostics[id] = '_dreamer_config_load';
+        vscode.postMessage({ command: 'runDiagnostic', diagKey: 'show_rssm', id: id });
+    }
+
+    function renderConfigSection(values, section, schema) {
+        var keys = Object.keys(schema);
+        return keys.map(function(key) {
+            var opts = schema[key];
+            var val = values ? values[key] : '';
+            if (val === undefined || val === null) val = '';
+            if (opts.type === 'checkbox') {
+                return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;min-height:24px;border-bottom:1px solid rgba(255,255,255,0.04);">' +
+                    '<label style="opacity:0.8;font-size:11px;">' + opts.label + '</label>' +
+                    '<input type="checkbox" ' + (val ? 'checked' : '') + ' style="width:14px;height:14px;margin:0;flex-shrink:0;" data-section="' + section + '" data-key="' + key + '" onchange="updateConfigField(\'' + section + '\',\'' + key + '\',this.checked)">' +
+                    '</div>';
+            }
+            return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;min-height:24px;border-bottom:1px solid rgba(255,255,255,0.04);">' +
+                '<label style="opacity:0.8;flex:1;font-size:11px;">' + opts.label + '</label>' +
+                '<input type="number" value="' + val + '" min="' + opts.min + '" max="' + opts.max + '" step="' + opts.step + '" ' +
+                'style="width:70px;text-align:right;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);padding:3px 6px;font-size:11px;border-radius:2px;flex-shrink:0;" ' +
+                'data-section="' + section + '" data-key="' + key + '" onchange="updateConfigField(\'' + section + '\',\'' + key + '\',parseFloat(this.value))">' +
+                '</div>';
+        }).join('');
+    }
+
+    function renderDreamerConfig(config) {
+        _dreamerConfig = config;
+        var el;
+        el = document.getElementById('reward-config-fields');
+        if (el) el.innerHTML = renderConfigSection(config.rewards, 'rewards', {
+            hold_accept: { label: 'HOLD Accept', min: -5, max: 5, step: 0.1 },
+            hold_override: { label: 'HOLD Override', min: -5, max: 5, step: 0.1 },
+            bag_induct: { label: 'Bag Induct', min: -5, max: 5, step: 0.1 },
+            bag_forget: { label: 'Bag Forget', min: -5, max: 5, step: 0.1 },
+            workflow_save: { label: 'Workflow Save', min: -5, max: 5, step: 0.1 },
+            workflow_success: { label: 'Workflow Success', min: -5, max: 5, step: 0.1 },
+            workflow_failure: { label: 'Workflow Failure', min: -5, max: 5, step: 0.1 },
+            tool_success: { label: 'Tool Success', min: -5, max: 5, step: 0.01 },
+            tool_error: { label: 'Tool Error', min: -5, max: 5, step: 0.01 },
+            mutation_kept: { label: 'Mutation Kept', min: -5, max: 5, step: 0.1 },
+            mutation_reverted: { label: 'Mutation Reverted', min: -5, max: 5, step: 0.1 },
+            normalize: { label: 'Symlog Normalize', type: 'checkbox' }
+        });
+        el = document.getElementById('training-config-fields');
+        if (el) el.innerHTML = renderConfigSection(config.training, 'training', {
+            enabled: { label: 'Enabled', type: 'checkbox' },
+            auto_train: { label: 'Auto-Train', type: 'checkbox' },
+            world_model_frequency: { label: 'World Model Freq', min: 8, max: 256, step: 8 },
+            critic_frequency: { label: 'Critic Freq', min: 8, max: 256, step: 8 },
+            full_cycle_frequency: { label: 'Full Cycle Freq', min: 16, max: 512, step: 16 },
+            batch_size: { label: 'Batch Size', min: 8, max: 128, step: 8 },
+            noise_scale: { label: 'Noise Scale', min: 0.001, max: 0.1, step: 0.001 },
+            gamma: { label: 'Gamma (discount)', min: 0.9, max: 0.999, step: 0.001 },
+            lambda: { label: 'Lambda (GAE)', min: 0.8, max: 0.99, step: 0.01 },
+            critic_target_tau: { label: 'Target EMA Tau', min: 0.001, max: 0.1, step: 0.001 },
+            timeout_budget_seconds: { label: 'Timeout Budget (s)', min: 5, max: 55, step: 5 }
+        });
+        el = document.getElementById('imagination-config-fields');
+        if (el) el.innerHTML = renderConfigSection(config.imagination, 'imagination', {
+            horizon: { label: 'Horizon', min: 5, max: 50, step: 5 },
+            n_actions: { label: 'Action Branches', min: 2, max: 16, step: 1 },
+            auto_imagine_on_train: { label: 'Auto-Imagine on Train', type: 'checkbox' }
+        });
+        el = document.getElementById('buffer-config-fields');
+        if (el) el.innerHTML = renderConfigSection(config.buffers, 'buffers', {
+            reward_buffer_max: { label: 'Reward Buffer Max', min: 100, max: 50000, step: 100 },
+            obs_buffer_max: { label: 'Obs Buffer Max', min: 100, max: 10000, step: 100 },
+            value_history_max: { label: 'Value History Max', min: 50, max: 1000, step: 50 },
+            reward_rate_window: { label: 'Rate Window', min: 10, max: 500, step: 10 }
+        });
+        el = document.getElementById('arch-config-fields');
+        if (el && config.architecture) {
+            el.innerHTML = Object.keys(config.architecture).map(function(k) {
+                return '<div style="display:flex;justify-content:space-between;padding:2px 0;"><span style="opacity:0.7;">' + k + '</span><span style="font-variant-numeric:tabular-nums;">' + config.architecture[k] + '</span></div>';
+            }).join('');
+        }
+    }
+
+    function updateConfigField(section, key, value) {
+        if (!_dreamerConfig) return;
+        if (!_dreamerConfig[section]) _dreamerConfig[section] = {};
+        _dreamerConfig[section][key] = value;
+    }
+
+    function saveDreamerConfig() {
+        if (!_dreamerConfig) return;
+        vscode.postMessage({ command: 'saveDreamerConfig', config: _dreamerConfig });
+        var status = document.getElementById('config-save-status');
+        if (status) { status.textContent = 'Saved \u2713'; setTimeout(function() { status.textContent = ''; }, 2000); }
+    }
+
+    function resetDreamerConfig() {
+        vscode.postMessage({ command: 'resetDreamerConfig' });
+        var status = document.getElementById('config-save-status');
+        if (status) { status.textContent = 'Reset to defaults \u2713'; setTimeout(function() { status.textContent = ''; loadDreamerConfig(); }, 1000); }
+    }
+
+    window.runImagination = runImagination;
+    window.toggleDreamerConfig = toggleDreamerConfig;
+    window.updateConfigField = updateConfigField;
+    window.saveDreamerConfig = saveDreamerConfig;
+    window.resetDreamerConfig = resetDreamerConfig;
+
+    // ═══════════════ END DREAMER UI ═══════════════
 
     var MEMORY_TOOLS = ['bag_catalog', 'bag_search', 'bag_get', 'bag_export', 'bag_induct', 'bag_forget', 'bag_put', 'pocket', 'summon', 'materialize', 'get_cached'];
     var COUNCIL_TOOLS = ['council_status', 'all_slots', 'broadcast', 'council_broadcast', 'set_consensus', 'debate', 'chain', 'slot_info', 'get_slot_params', 'invoke_slot', 'plug_model', 'unplug_slot', 'clone_slot', 'mu' + 'tate_slot', 'rename_slot', 'swap_slots', 'hub_plug', 'cu' + 'll_slot'];
