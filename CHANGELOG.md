@@ -2,6 +2,44 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.8.1] - 2026-02-23
+
+### Dreamer-Hold Transmission — Bidirectional Bridge
+
+Wires the dreamer training pipeline to the cascade-lattice HOLD system. Hold resolutions now feed rewards back to the dreamer. Dreamer imagination populates hold points with human-readable decision matrices. Config-driven gates control when holds fire. CausationHold sessions enable temporal navigation. Dreamer state persists across restarts.
+
+**Layer 1: Hold Resolution → Dreamer Reward**
+- MCP `hold_resolve` now fires `_capture_reward()` on accept/override, closing the feedback loop so the dreamer learns from human decisions at hold gates.
+- Internal `_HoldState.yield_point()` reward capture already wired (uses local `result` variable per errata Issue 20).
+- Response enriched with `dreamer_reward_captured` and `reward_source` fields.
+
+**Layer 2: Dreamer → Hold (Imagination into HoldPoints)**
+- `_dreamer_hold_point()` runs imagination, scores branches via critic, normalizes to action_probs via temperature-scaled softmax.
+- MCP `hold_yield` now uses real dreamer action_probs/value instead of static `[1.0, 0.0]`.
+- Response includes `decision_matrix` with per-action labels, values, confidence, and world prediction.
+- All imagination data is ASSOCIATIVE (human-readable strings and primitives, no raw numpy).
+
+**Layer 3: Dynamic Hold Gates**
+- New `hold` section in `dreamer_config.json` with `confidence_threshold`, `expose_imagination`, `blocking`, `auto_resolve_timeout`, `max_branches_displayed`.
+- Auto-pass when best branch confidence exceeds threshold (default 0.85).
+- Config re-read on each hold — tune at runtime without restart.
+
+**Layer 4: CausationHold Session Integration**
+- `_init_causation_hold()` creates a CausationHold session at capsule startup.
+- `_capture_hold_step()` records inference steps for temporal navigation (rewind, branch_from, forward, jump_to).
+- Graceful degradation: import failure sets `_causation_hold = None`, all calls become no-ops.
+
+**Layer 5: Persistence**
+- `_save_dreamer_state()` serializes critic, reward head, continue head, training stats, and last 100 reward buffer events via base64+gzip.
+- `_load_dreamer_state()` restores on startup. Missing/corrupt files return False, components start fresh.
+- Auto-save after every `_train_step()`.
+
+**Enriched Tool Responses (backward compatible)**
+- `get_status`: Added `hold_config`, `causation_hold_active`, `causation_hold_steps`, `persistence_file_exists` to dreamer section.
+- `show_rssm`: Added `hold_gate` section with threshold, expose_imagination, blocking, causation_hold status.
+- `imagine`: Already enriched with `critic_value` and `pred_reward` per step (from v0.8.0).
+- All new data under new keys only — no existing fields modified.
+
 ## [0.8.0] - 2026-02-23
 
 ### DreamerV3 Full Integration — Critic, Rewards, Training & Display

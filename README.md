@@ -116,14 +116,13 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.8.0
+## What's New in 0.8.1
 
-- **DreamerV3 Full Integration** — Complete learning loop: reward capture from live MCP operations, critic/reward/continue value heads, 4-phase gradient-free training, and branching imagination with per-action trajectories.
-- **Critic Head** — MLP (5120->256->256->1, ~1.4M params) with EMA target network for TD learning. Predicts value of latent states during imagination rollouts.
-- **Reward Signal Capture** — 6 hook points across tool calls, HOLD decisions, FelixBag operations, and workflow execution. All rewards config-weighted and symlog-normalized.
-- **Config-Driven** — `dreamer_config.json` controls all hyperparameters with runtime hot-reload. Tune reward weights, training frequency, imagination horizon without restart.
-- **Enriched Tool Responses** — `get_status`, `show_rssm`, and `imagine` now return dreamer diagnostics (critic values, reward stats, training metrics) with zero new MCP tools.
-- **Sidebar Dreamer Widget** — Extension UI shows dreamer status, imagination trigger, and config editor in the diagnostics tab.
+- **Dreamer-Hold Transmission** — Bidirectional bridge between the dreamer training pipeline and the HOLD system. Hold resolutions feed rewards back to the dreamer. Dreamer imagination populates hold points with human-readable decision matrices.
+- **Dynamic Hold Gates** — Config-driven `confidence_threshold`, `expose_imagination`, `blocking`, and `auto_resolve_timeout` in `dreamer_config.json`. Auto-pass when the dreamer is confident. Tune at runtime without restart.
+- **CausationHold Sessions** — Temporal navigation of decision history via cascade-lattice CausationHold. Rewind, branch, and explore alternative futures.
+- **Dreamer Persistence** — Critic weights, reward head, training stats, and reward buffer survive capsule restarts via base64+gzip serialization.
+- **Enriched Hold Responses** — `hold_yield` returns a `decision_matrix` with per-action values, confidence, and world prediction. `hold_resolve` returns `dreamer_reward_captured` feedback.
 
 See [CHANGELOG.md](CHANGELOG.md) for full release history.
 

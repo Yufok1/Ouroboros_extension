@@ -81,6 +81,12 @@ SMART_LOADER_TODO.md
 cleaned_guide.txt
 media/check_logic.txt
 media/levels.txt
+bug_list_v080.md
+test_write.txt
+INTELLIGENCE_REPORT.md
+plans/**
+.capsule_state.json
+.github/**
 
 # Claude/agent working dirs
 .claude/**
