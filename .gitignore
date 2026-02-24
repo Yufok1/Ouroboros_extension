@@ -17,6 +17,9 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# HuggingFace Space (separate repo)
+Champion_Council/
+
 # IDE/agent working dirs
 .vscode/
 .claude/
