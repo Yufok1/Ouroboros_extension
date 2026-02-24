@@ -4,7 +4,7 @@ Local-first AI orchestration for VS Code and compatible editors. Run multi-model
 
 ## Core Features
 
-- **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Smart loader auto-detects model type (LLM, Embedding, SEQ2SEQ, Vision, VLM, Classifier) and routes to the correct loader. Token budgets are read from each model's actual config (`max_position_embeddings`, `generation_config`) at plug time — no hardcoded limits. Rich metadata cards show model author, task, downloads, license, and size.
+- **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Smart loader auto-detects model type (LLM, Embedding, Reranker, SEQ2SEQ, Vision, VLM, Classifier) from actual config.json metadata and routes to the correct loader. Cross-encoders are loaded via `CrossEncoder()` with sentence-pair scoring. Token budgets are read from each model's actual config (`max_position_embeddings`, `generation_config`) at plug time — no hardcoded limits. Rich metadata cards show model author, task, downloads, license, and size.
 - **140+ MCP Tools** — Full MCP/SSE tool surface for IDE agents and automation. Works with any MCP client (Claude Code, Cursor, Windsurf, etc.).
 - **Workflow Engine v2.2** — 10 node types: `tool` (universal MCP tool caller), `agent` (plugged model with granted tools loop), `input`, `output`, `fan_out` (parallel), `http`, `if`, `set`, `merge`, and `web_search`. Build DAGs with expression interpolation, conditional branching, agentic reasoning loops, and live execution tracing.
 - **Semantic Memory (FelixBag)** — Local embedding store with search, catalog, induction, and export. Persistent across sessions.
@@ -116,19 +116,16 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.8.1
+## What's New in 0.8.9
 
-- **Dreamer-Hold Transmission** — Bidirectional bridge between the dreamer training pipeline and the HOLD system. Hold resolutions feed rewards back to the dreamer. Dreamer imagination populates hold points with human-readable decision matrices.
-- **Dynamic Hold Gates** — Config-driven `confidence_threshold`, `expose_imagination`, `blocking`, and `auto_resolve_timeout` in `dreamer_config.json`. Auto-pass when the dreamer is confident. Tune at runtime without restart.
-- **CausationHold Sessions** — Temporal navigation of decision history via cascade-lattice CausationHold. Rewind, branch, and explore alternative futures.
-- **Dreamer Persistence** — Critic weights, reward head, training stats, and reward buffer survive capsule restarts via base64+gzip serialization.
-- **Enriched Hold Responses** — `hold_yield` returns a `decision_matrix` with per-action values, confidence, and world prediction. `hold_resolve` returns `dreamer_reward_captured` feedback.
+- **RERANKER Dispatch Fix** — CrossEncoder (reranker) models no longer crash dispatch tables. Fixed across `_invoke_model`, `_council_deliberate`, and all 6 hasattr-based MCP tools (`pipe`, `compare`, `broadcast`, `debate`, `chain`, `all_slots`), plus `invoke_slot` auto mode. Mixed councils with rerankers now work everywhere.
+- **Per-Councilor Fault Isolation** — One bad model in the council can no longer crash the entire deliberation. Each councilor is wrapped in try/except with hash-based fallback.
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history.
+See [CHANGELOG.md](https://github.com/Yufok1/Ouroboros_extension/blob/HEAD/CHANGELOG.md) for full release history.
 
 ## Architecture
 
-See [COMMS_ARCHITECTURE.md](COMMS_ARCHITECTURE.md) for the full communications and identity protocol roadmap.
+See [COMMS_ARCHITECTURE.md](https://github.com/Yufok1/Ouroboros_extension/blob/HEAD/COMMS_ARCHITECTURE.md) for the full communications and identity protocol roadmap.
 
 ## License
 

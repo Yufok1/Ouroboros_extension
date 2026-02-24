@@ -2,6 +2,221 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.8.9] - 2026-02-24
+
+### RERANKER Dispatch Fix — All Dispatch Tables
+
+CrossEncoder (reranker) models crashed every tool that dispatches by model type. Fixed across all three dispatch table patterns.
+
+**`_invoke_model` — ModelType.RERANKER Case (HIGH)**
+- Both L0 and L1 `_invoke_model` had no `ModelType.RERANKER` case. CrossEncoder fell through to generic `model(inputs)` → crash.
+- Fix: Added `ModelType.RERANKER` dispatch — uses `model.predict(pairs)` when documents provided, hash-based fallback otherwise. Also added `ModelType.CLASSIFIER` case.
+
+**`_council_deliberate` — RERANKER Guard (HIGH)**
+- CrossEncoder has `forward`, `config`, and is `callable` (from `nn.Module`), so it fell through the hasattr chain to `callable(model)` → crash with "RERANKER" exception.
+- Fix: Added RERANKER check as second priority after LLM. Uses `_model_type_hint` and `ModelType` enum. Per-councilor try/except so one bad model can't crash the whole council.
+
+**MCP Tools — RERANKER Guard in 6 Tools (HIGH)**
+- `pipe`, `compare`, `broadcast`, `debate`, `chain`, `all_slots` all dispatch via `hasattr(model, 'predict')`. CrossEncoder matches (it has `predict`) but expects `[[query, doc]]` pairs, not a single string → crash.
+- Fix: Added `getattr(model, '_model_type_hint', None) == 'RERANKER'` guard before the `predict/classify` branch in all 6 tools. Rerankers produce a deterministic hash-based fallback value.
+
+**`invoke_slot` Auto Mode — RERANKER Guard (MEDIUM)**
+- Auto mode detected CrossEncoder via `hasattr(model, 'predict')` → called `model.predict([text])` → crash (needs sentence pairs).
+- Fix: RERANKER check inside the classify branch. Returns hash-based output instead of crashing.
+
+## [0.8.8] - 2026-02-24
+
+### Unified Model Detection & Cross-Encoder Reranking
+
+Collapsed 4 competing model identification systems into one unified chain. Cross-encoder reranking now works end-to-end.
+
+**Unified Model Type Detection (HIGH)**
+- Previously: 4 independent systems (Hub API, local config, runtime `hasattr`, consensus re-detection) all guessed model types independently and contradicted each other.
+- Fix: Single source of truth. `_load_model_smart` reads actual `config.json` metadata (architectures, label count) from disk, sets `_model_type_hint` on the model object. `_detect_model_type_runtime` reads the hint first, falls back to class identity, then `hasattr` probing only as last resort. All 15+ call sites now respect the loader's decision.
+- Added `RERANKER` and `CLASSIFIER` as first-class `ModelType` enum values.
+
+**Cross-Encoder Detection from Actual Config (HIGH)**
+- Hub API tags cross-encoders as `sentence-similarity` (EMBEDDING). Config.json refinement now overrides: `ForSequenceClassification` + ≤2 labels → RERANKER, many labels → CLASSIFIER.
+- New `_load_as_reranker` function loads via `CrossEncoder()` class (not `SentenceTransformer`), sets `_model_type_hint = 'RERANKER'`.
+- `_load_as_embedding` now sets `_model_type_hint = 'EMBEDDING'` (was missing).
+
+**Rerank Tool — Cross-Encoder Sentence-Pair Scoring (HIGH)**
+- Priority 1: Find model with `_model_type_hint == 'RERANKER'`, use `.predict()` for sentence-pair scoring. Response reports `method: "cross-encoder"`.
+- Priority 2: Cosine-similarity fallback with embedding models. Response reports `method: "cosine-similarity"`.
+
+**Pipe/Chain — Empty List Error Handling (LOW)**
+- `pipe(pipeline=[])` and `chain(slot_sequence=[])` no longer throw raw Pydantic "Field required" errors.
+- Pydantic schema fix: fields now `Optional[list] = None` so empty lists reach the handler.
+- Handler returns specific error messages with usage examples.
+
+**Extension — Structured Log Parsing**
+- MCP log poller now parses structured `📊` JSON lines from v0.8.3+ champions, carrying full args, results, metrics, cascade step, and real duration.
+- Legacy `🔧` one-liner parsing preserved as fallback for older champions.
+
+## [0.8.7] - 2026-02-23
+
+### Recompiled Champion Capsule — v0.8.4–0.8.6 Bug Fixes Baked In
+
+Fresh champion_gen8 compilation incorporating all fixes from the v0.8.4 → v0.8.5 → v0.8.6 bug fix cycle. This is the first capsule build with all three rounds of fixes verified and compiled together.
+
+**Fixes included in this capsule (from v0.8.4–v0.8.6):**
+- Smart loader local path model type detection (EMBEDDING, CLASSIFIER, RERANKER, LLM, SEQ2SEQ)
+- Cross-encoder reranker detection (`≤2 labels` / `sbert_ce_default_activation_function` → RERANKER, not CLASSIFIER)
+- `deliberate` CLASSIFIER crash fix (`ModelType.GENERIC` fallback + hash-based vote routing)
+- `classify` two-pass slot selection (prefer `_model_type_hint == 'CLASSIFIER'` over any `predict()`)
+- Workflow `if` node skip propagation (counter-based: merge/output skip only when ALL upstreams skipped)
+- Non-LLM model filtering in deliberation (embedders/rerankers contribute embeddings only)
+- `pipe` pipeline freeze and empty-list guard
+- `cull_slot`/`unplug_slot` name reset to `slot_N`
+- `rerank` cross-encoder priority with sentence-pair scoring
+
+**Known framework limits (not fixable in champion):**
+- `chain` empty sequence: pydantic validation drops empty lists before handler is reached
+- `pipe` slot 0 append: needs retest — code looks correct post-v0.8.5
+
+## [0.8.6] - 2026-02-23
+
+### Council Deliberation, Classify Routing & Reranker Detection
+
+Three bugs fixed — one regression from v0.8.5, two persistent issues.
+
+**`deliberate` — CLASSIFIER Crash Fix (HIGH)**
+- `_council_deliberate` crashed with `"Deliberation failed: CLASSIFIER"` when any CLASSIFIER-typed model was plugged.
+- Root cause: `ModelType` enum has no `CLASSIFIER` member — `ModelType.CLASSIFIER` raised an exception.
+- Fix: CLASSIFIER-hinted models now route directly to hash-based vote path before `ModelType` routing. Set `ModelType.GENERIC` as safe fallback.
+- Deliberation now works with mixed councils (LLM + embedder + classifier + reranker).
+
+**`classify` — Wrong Slot Selection (MEDIUM)**
+- `classify` picked the first model with `predict()` — the cross-encoder reranker (slot 2) instead of the emotion classifier (slot 3).
+- Fix: Two-pass search. Pass 1 prefers models with `_model_type_hint == 'CLASSIFIER'`. Pass 2 falls back to any model with `predict()`.
+
+**Smart Loader — Cross-Encoder Reranker Detection (MEDIUM)**
+- Cross-encoders (`ms-marco-MiniLM`, etc.) were detected as `CLASSIFIER` instead of `RERANKER`.
+- Both branches of the `id2label` check in local config.json detection set `'CLASSIFIER'` — the `≤2 labels` / `sbert_ce_default_activation_function` branch should have been `'RERANKER'`.
+- Fix: Cross-encoders now detected as `'RERANKER'`. New routing case loads via `_load_as_classifier` then overrides `_model_type_hint` to `'RERANKER'`.
+- Cascade fix: `rerank` tool's Priority 1 search now finds the cross-encoder via `_model_type_hint == 'RERANKER'`, enabling proper sentence-pair scoring.
+
+## [0.8.5] - 2026-02-23
+
+### Smart Loader, Workflow Engine & Council Fixes
+
+Five bugs fixed — one critical cascade root cause, one regression, three persistent issues.
+
+**Smart Loader — Local Path Model Detection (CRITICAL)**
+- Added local `config.json` architecture detection after HuggingFace Hub detection fails.
+- Detection priority: `modules.json` / `config_sentence_transformers.json` → EMBEDDING; `ForSequenceClassification` / `ForTokenClassification` → CLASSIFIER; `ForCausalLM` → LLM; `Seq2Seq` / `ForConditionalGeneration` → SEQ2SEQ; `1_Pooling/` directory → EMBEDDING.
+- Cascade fix: resolves classify tool "No classification model found" (v0.8.4 Bug 3), pipe type routing (Bug 5), and rerank cross-encoder scoring (Bug 9).
+
+**Workflow `if` Node — Merge/Output Skip Regression (HIGH)**
+- Replaced boolean skip flag with counter-based logic tracking `_skip_count` and `_total_upstream`.
+- Merge and output nodes now skip only if ALL upstreams are skipped.
+- Regular branch nodes still skip if ANY upstream is skipped.
+- Fixes the v0.8.4 regression where merge/output nodes were incorrectly skipped.
+
+**`deliberate` — Non-LLM Model Filtering (MEDIUM)**
+- Added `_model_type_hint` check before runtime detection in council deliberation.
+- EMBEDDING/RERANKER models contribute embeddings only, not garbage text generation.
+- CLASSIFIER models route to classification path.
+- Only genuine LLM-typed models enter text generation.
+
+**`pipe` — Unrequested Slot 0 Fallback (MEDIUM)**
+- Added pipeline list freeze and empty-list guard returning error.
+- Prevents external mutation of the pipeline parameter.
+
+**`chain` — Empty Sequence Passthrough (LOW)**
+- Added slot_sequence list freeze and explicit empty-list early return.
+- Returns input text as passthrough instead of defaulting to slot 0.
+
+## [0.8.4] - 2026-02-23
+
+### Workflow & Council Bug Fixes
+
+Nine bugs discovered during Hydra Workflow Orchestration & Evolutionary Adapter testing. Seven fixed, one already fixed, one not reproducible.
+
+**`deliberate` — Text Output Restoration (CRITICAL)**
+- LLM council members now call `model.generate(text=question)` instead of producing deterministic hash vectors.
+- Text responses stored in `_text_responses` and included as `text_output` in per-councilor vote details.
+- `consensus_output` is now the LLM-generated text string when any LLM produces a response.
+- New `consensus_vector` field carries the numeric embedding for downstream math.
+- Confidence raised from 0.3 to 0.7 for successful LLM generation.
+- Fallback to hash-based voting if LLM generation fails.
+
+**Workflow `if` Node — Branch Skip Propagation (HIGH)**
+- Added skip propagation in DAG traversal: if ANY upstream source node has `status: "skipped"`, the current node is also skipped.
+- Propagates correctly through arbitrary DAG depth via topological execution order.
+- Unrouted branches now show `status: "skipped"`, `elapsed: 0ms` for all downstream nodes.
+- Conditional workflows run 2-3x faster (no wasted LLM generation on unchosen branches).
+
+**Smart Loader — Local Classifier Detection (HIGH)**
+- Added local `config.json` architecture detection fallback after HuggingFace Hub detection fails.
+- Reads `architectures` array from config.json for local-path models (HF cache).
+- Detects `ForSequenceClassification`/`ForTokenClassification` → CLASSIFIER.
+- Detects `ForCausalLM`/`ForMaskedLM` → LLM, `Seq2Seq`/`ForConditionalGeneration` → SEQ2SEQ, `SentenceTransformer` → EMBEDDING.
+- Fixes both Bug 3 (`classify` tool "No classification model found") and Bug 4 (`LLMWrapper` has no `predict`).
+
+**`pipe` — Model Type Hint Routing (MEDIUM)**
+- Added `_model_type_hint` check as first priority before `hasattr` method detection.
+- CLASSIFIER hint → classify/predict. EMBEDDING/RERANKER hint → encode. Existing fallback preserved.
+- Prevents misrouting of wrapped models that expose multiple methods.
+
+**`rerank` — Cross-Encoder Priority (MEDIUM)**
+- Added Priority 1 search: finds actual cross-encoder/reranker model in council (checks `_model_type_hint == 'RERANKER'` or name contains `rerank`/`cross`).
+- Uses proper sentence-pair scoring: `model.predict([(query, doc) for doc in documents])`.
+- Response includes `method` field (`"cross-encoder"` or `"cosine-similarity"`).
+- Falls through to embedding cosine similarity as Priority 2.
+
+**`cull_slot` / `unplug_slot` — Name Reset (LOW)**
+- Unplugged slots now reset name to `slot_N` default format in both `cull_slot` and `unplug_slot` handlers.
+
+**`chain` — Empty Sequence (LOW)**
+- Already fixed in current codebase. Returns input passthrough on empty `slot_sequence`.
+
+**`pipe` — Fallback Slot (LOW)**
+- Not reproducible. No fallback-to-slot-0 logic exists in current pipe handler.
+
+## [0.8.3] - 2026-02-23
+
+### Activity Feed — Full External Call Visibility
+
+External MCP tool calls (from Kiro, Claude, etc.) now emit structured JSON log lines with complete args, results, duration, and error details. The Activity Feed parses these to show the same rich data you get from extension-source calls.
+
+**Champion (logged_tool decorator)**
+- Success path emits `📊` JSON line with full args (1KB/arg cap), full result (4KB cap), duration_ms, status.
+- Error path emits `📊` JSON line with full args, error message (2KB cap), duration_ms, status.
+- Backward compatible — old champions without structured lines still work via legacy parser.
+
+**Extension (mcpServer.ts)**
+- New `parseStructuredLine()` detects and parses `📊` JSON log lines.
+- `pollMcpLogForActivity()` prefers structured data when available, falls back to legacy `🔧` one-liners.
+- Peek-ahead deduplication prevents double-emit when both `🔧` and `📊` lines exist for the same call.
+
+## [0.8.2] - 2026-02-23
+
+### Evolutionary Adapter Persistence — Virtual Populations Enabled
+
+Fixes the grab/restore/cull pipeline so evolutionary adapter mutations survive serialization. Enables virtual populations via FelixBag where mutated adapter states persist across sessions and beyond the 32 live slot limit.
+
+**grab_slot — Adapter Weight Serialization**
+- Now serializes all brain adapter weight arrays (lora_A, lora_B, lora_bias, adapter_in, adapter_out, adapter_bias) alongside model source pointer.
+- Per-councilor adapter weights also captured if present.
+- Both MCP tool and relay handler paths fixed.
+- Response includes `adapter_keys_saved` and `adapter_params_total`.
+
+**restore_slot — Full State Recovery**
+- Re-plugs model AND restores serialized adapter weights from FelixBag.
+- Relay handler upgraded from stub (`restore_slot requires TUI context`) to full restore with adapter weight recovery.
+- Response includes `adapter_weights_restored` and `has_adapter`.
+
+**cull_slot — Evolutionary Selection Support**
+- Falls through to unplug slot model when no `_clones` exist, enabling the evolutionary pattern: cull losers -> clone winners -> mutate.
+- `count=0` force-unplugs the slot.
+- No longer errors on slots with models but no clones.
+
+**get_slot_params — Adapter Visibility**
+- Now reports brain adapter parameter counts and shapes alongside model params.
+- Shows `adapter_total`, per-weight `shape` and `count` for all adapter arrays.
+- Slots include `plugged` boolean for quick population scanning.
+
 ## [0.8.1] - 2026-02-23
 
 ### Dreamer-Hold Transmission — Bidirectional Bridge

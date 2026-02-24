@@ -1285,8 +1285,66 @@
             detail += '<div class="ad-section"><span class="ad-label">Arguments</span>\nNone</div>';
         }
         if (e.result) {
-            var resultStr = typeof e.result === 'string' ? e.result : JSON.stringify(e.result, null, 2);
-            detail += '<div class="ad-section"><span class="ad-label">Result</span>\n' + _actEsc(resultStr.substring(0, 4000)) + '</div>';
+            var resultObj = e.result;
+            // ── Unwrap MCP protocol envelope for extension-source calls ──
+            // callTool returns { content: [{ type: "text", text: "..." }], structuredContent: {...} }
+            if (typeof resultObj === 'object' && resultObj !== null && resultObj.content && Array.isArray(resultObj.content)) {
+                // Try structuredContent.result first (parsed), then content[0].text (raw)
+                var innerText = null;
+                if (resultObj.structuredContent && resultObj.structuredContent.result) {
+                    innerText = resultObj.structuredContent.result;
+                } else if (resultObj.content[0] && resultObj.content[0].text) {
+                    innerText = resultObj.content[0].text;
+                }
+                if (innerText) {
+                    // Try to parse as JSON for structured rendering
+                    try {
+                        resultObj = JSON.parse(innerText);
+                    } catch (ex) {
+                        resultObj = innerText;
+                    }
+                }
+            }
+            // Render structured results with per-key formatting
+            if (typeof resultObj === 'object' && resultObj !== null && !Array.isArray(resultObj)) {
+                var resultLines = [];
+                for (var rk in resultObj) {
+                    if (!resultObj.hasOwnProperty(rk)) continue;
+                    if (rk.startsWith('_')) continue; // skip internal keys like _cached, _size
+                    var rv = resultObj[rk];
+                    var rvStr = (rv === null || rv === undefined) ? 'null' : (typeof rv === 'object' ? JSON.stringify(rv, null, 2) : String(rv));
+                    resultLines.push(_actEsc(rk) + ': ' + _actEsc(rvStr));
+                }
+                detail += '<div class="ad-section"><span class="ad-label">Result</span>\n' + resultLines.join('\n') + '</div>';
+            } else {
+                var resultStr = typeof resultObj === 'string' ? resultObj : JSON.stringify(resultObj, null, 2);
+                detail += '<div class="ad-section"><span class="ad-label">Result</span>\n' + _actEsc(resultStr.substring(0, 4000)) + '</div>';
+            }
+        }
+
+        // ── CASCADE enrichment for external structured calls ──
+        if (source === 'external') {
+            var metaLines = [];
+            // Metrics extracted from result
+            if (e.result && typeof e.result === 'object' && e.result.metrics && typeof e.result.metrics === 'object') {
+                var mParts = [];
+                for (var mk in e.result.metrics) {
+                    if (e.result.metrics.hasOwnProperty(mk)) mParts.push(_actEsc(mk) + '=' + _actEsc(String(e.result.metrics[mk])));
+                }
+                if (mParts.length > 0) metaLines.push('Metrics: ' + mParts.join(', '));
+            }
+            // Cascade step
+            if (e.result && typeof e.result === 'object' && e.result.cascade_step) {
+                metaLines.push('CASCADE Step: #' + _actEsc(String(e.result.cascade_step)));
+            }
+            // Result size + cached
+            if (e.result && typeof e.result === 'object' && e.result.result_size) {
+                var sizeStr = e.result.result_size > 1024 ? (e.result.result_size / 1024).toFixed(1) + 'KB' : e.result.result_size + 'B';
+                metaLines.push('Result Size: ' + sizeStr + (e.result.cached ? ' (cached)' : ''));
+            }
+            if (metaLines.length > 0) {
+                detail += '<div class="ad-section" style="opacity:0.7"><span class="ad-label">CASCADE</span>\n' + metaLines.join('\n') + '</div>';
+            }
         }
 
         var sourceBadge = source === 'external'

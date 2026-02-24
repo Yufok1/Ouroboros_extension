@@ -145,6 +145,7 @@ export class MCPServerManager {
     private _mcpLogPath: string = '';
     private _mcpLogOffset: number = 0;
     private _mcpLogRemainder: string = '';
+    private _pendingToolLines: Array<{ tool: string; timestamp: number; seen: number }> = [];
     private _mcpLogCapsuleHint?: string;
     private _mcpLogResolveCount: number = 0;
     private _mcpLogPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -706,6 +707,32 @@ export class MCPServerManager {
         };
     }
 
+    /** Parse structured 📊 JSON log lines emitted by logged_tool decorator. */
+    private parseStructuredLine(line: string): { timestamp: number; tool: string; args: Record<string, any>; result?: any; error?: string; durationMs: number; status: string } | null {
+        const match = line.match(/^\[(\d{2}):(\d{2}):(\d{2})\]\s+📊\s+(.+)$/);
+        if (!match) { return null; }
+        try {
+            const data = JSON.parse(match[4]);
+            // Merge CASCADE metadata into result for webview rendering
+            let result = data.result;
+            if (result && typeof result === 'object' && !Array.isArray(result)) {
+                if (data.metrics) { result.metrics = data.metrics; }
+                if (data.cascade_step) { result.cascade_step = data.cascade_step; }
+                if (data.cached !== undefined) { result.cached = data.cached; }
+                if (data.result_size) { result.result_size = data.result_size; }
+            }
+            return {
+                timestamp: this.parseLogTimestamp(Number(match[1]), Number(match[2]), Number(match[3])),
+                tool: data.tool,
+                args: data.args || {},
+                result,
+                error: data.error,
+                durationMs: data.duration_ms || 0,
+                status: data.status || 'unknown'
+            };
+        } catch { return null; }
+    }
+
     private async pollMcpLogForActivity(): Promise<void> {
         if (!this._mcpLogPath || this._status !== 'running') { return; }
 
@@ -755,12 +782,39 @@ export class MCPServerManager {
 
         for (const line of lines) {
             if (!line.trim()) { continue; }
-            const parsed = this.parseToolLine(line);
-            if (!parsed) { continue; }
-            if (this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) {
+
+            // ── STRUCTURED 📊 JSON lines ──
+            // These carry full args, result, metrics, duration. Prefer when available.
+            const structured = this.parseStructuredLine(line);
+            if (structured) {
+                if (this.isLikelyLocalEcho(structured.tool, structured.timestamp)) {
+                    continue;
+                }
+                this.emitActivity({
+                    timestamp: structured.timestamp,
+                    tool: structured.tool,
+                    category: this.getCategoryForTool(structured.tool),
+                    args: structured.args,
+                    result: structured.error ? undefined : structured.result,
+                    error: structured.error,
+                    durationMs: structured.durationMs,
+                    source: 'external'
+                });
+                if (structured.tool === 'workflow_execute' || structured.tool === 'workflow_status') {
+                    const argsSummary = Object.entries(structured.args).map(([k, v]) => `${k}=${v}`).join(', ');
+                    this.fetchExternalWorkflowResult({ timestamp: structured.timestamp, tool: structured.tool, argsSummary }).catch(() => {});
+                }
                 continue;
             }
 
+            // ── 🔧 tool call lines ──
+            // Emit activity directly from these — they are the primary signal.
+            const parsed = this.parseToolLine(line);
+            if (!parsed) { continue; }
+
+            if (this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) {
+                continue;
+            }
             this.emitActivity({
                 timestamp: parsed.timestamp,
                 tool: parsed.tool,
@@ -770,7 +824,6 @@ export class MCPServerManager {
                 durationMs: 0,
                 source: 'external'
             });
-
             if (parsed.tool === 'workflow_execute' || parsed.tool === 'workflow_status') {
                 this.fetchExternalWorkflowResult(parsed).catch(() => {});
             }
