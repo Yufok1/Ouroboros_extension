@@ -2,6 +2,41 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.0] - 2026-02-25
+
+### GPU Fleet Tab + Dreamer Training Dashboard
+
+New GPU Fleet monitoring tab and enhanced Dreamer world model visibility across both the VS Code extension and the HuggingFace Space web panel.
+
+**GPU Fleet Tab (NEW)**
+- New "GPU Fleet" tab in the control panel for Vast.ai rental monitoring
+- Instance cards with GPU/VRAM utilization bars, color-coded per instance
+- Live cost tracking (rate + accumulated spend)
+- GPU offer search panel with sortable results and one-click RENT buttons
+- CONNECT/STOP action buttons per instance
+- Recent Vast.ai activity stream with tool call history
+- Extension host message handlers for vastInstances, vastSearch, vastRent, vastConnect, vastStop
+
+**Dreamer Training Dashboard (NEW)**
+- Real-time vital stats display: fitness, critic value, reward count, training cycles, active/hold status
+- Reward buffer and observation buffer fill bars with animated CSS transitions
+- Critic loss history chart (canvas-based, baseline vs perturbed with accept/reject dots)
+- RSSM architecture display (deter_dim, stoch_dim, stoch_classes, total_latent, action_dim, horizon)
+- Weight health indicators (param count, NaN/Inf check, LoRA rank/alpha)
+- HOLD protocol controls (YIELD/RESOLVE buttons with live status)
+- Imagination runner with adjustable horizon slider
+- Full Dreamer config editor with save/load/reset (persisted to FelixBag)
+
+**Dreamer Config Fix**
+- Fixed Dreamer config panel showing empty sections when no config exists in FelixBag
+- Now provides sensible defaults for all config fields (rewards, training, imagination, buffers, architecture)
+
+**HuggingFace Space Enhancements**
+- Aggregated API routes: `/api/dreamer/state`, `/api/dreamer/config`, `/api/vast/state`
+- Server-side training history accumulation for critic loss charts
+- Tab-aware polling (5s Dreamer, 10s GPU Fleet) — only polls when tab is active
+- Proxy-level bug fixes: get_genesis null guard, system role fallback for Gemma-2 models, orchestra consensus cleanup
+
 ## [0.8.9] - 2026-02-24
 
 ### RERANKER Dispatch Fix — All Dispatch Tables

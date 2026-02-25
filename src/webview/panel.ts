@@ -358,6 +358,42 @@ export class CouncilPanel {
                 } catch { /* best effort */ }
                 break;
             }
+            // ── VAST GPU FLEET COMMANDS ──
+            case 'vastInstances': {
+                try {
+                    const data = await this.mcp.callToolParsed('vast_instances', {});
+                    this.send({ type: 'vastInstancesResult', data });
+                } catch (e: any) { this.send({ type: 'vastInstancesResult', data: { error: e.message } }); }
+                break;
+            }
+            case 'vastSearch': {
+                try {
+                    const data = await this.mcp.callToolParsed('vast_search', { query: msg.query || 'rentable=true' });
+                    this.send({ type: 'vastSearchResult', data });
+                } catch (e: any) { this.send({ type: 'vastSearchResult', data: { error: e.message } }); }
+                break;
+            }
+            case 'vastRent': {
+                try {
+                    const data = await this.mcp.callToolParsed('vast_rent', { offer_id: msg.offerId });
+                    this.send({ type: 'vastRentResult', data });
+                } catch (e: any) { this.send({ type: 'vastRentResult', data: { error: e.message } }); }
+                break;
+            }
+            case 'vastConnect': {
+                try {
+                    const data = await this.mcp.callToolParsed('vast_connect', { instance_id: msg.instanceId });
+                    this.send({ type: 'vastConnectResult', data });
+                } catch (e: any) { this.send({ type: 'vastConnectResult', data: { error: e.message } }); }
+                break;
+            }
+            case 'vastStop': {
+                try {
+                    const data = await this.mcp.callToolParsed('vast_stop', { instance_id: msg.instanceId });
+                    this.send({ type: 'vastStopResult', data });
+                } catch (e: any) { this.send({ type: 'vastStopResult', data: { error: e.message } }); }
+                break;
+            }
             // ── NOSTR COMMANDS ──
             case 'nostrGetIdentity': {
                 if (this.nostr) {
@@ -4547,6 +4583,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <button class="tab" data-tab="tools">Tools</button>
     <button class="tab" data-tab="diagnostics">Diagnostics</button>
     <button class="tab" data-tab="workflows">Workflows</button>
+    <button class="tab" data-tab="gpufleet">GPU Fleet</button>
     <button class="tab" data-tab="community">Community</button>
 </div>
 
@@ -4740,6 +4777,46 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <button class="btn-dim" onclick="runDiagnostic('demo')">RUN DEMO</button>
     </div>
     <div class="section-head" style="margin-top:20px;">DREAMER WORLD MODEL</div>
+    <!-- Dreamer vital stats -->
+    <div id="dr-ext-vitals" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:12px;">
+        <div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Fitness</div>
+            <div id="dr-ext-fitness" style="font-size:18px;font-weight:bold;color:#a78bfa;">—</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Critic</div>
+            <div id="dr-ext-critic" style="font-size:18px;font-weight:bold;color:#60a5fa;">—</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Rewards</div>
+            <div id="dr-ext-rewards" style="font-size:18px;font-weight:bold;color:#34d399;">—</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Cycles</div>
+            <div id="dr-ext-cycles" style="font-size:18px;font-weight:bold;color:#f59e0b;">—</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Status</div>
+            <div id="dr-ext-status" style="font-size:12px;font-weight:bold;color:#22c55e;">—</div>
+        </div>
+    </div>
+    <!-- Dreamer buffer bars -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+        <div style="padding:6px 8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);margin-bottom:3px;">REWARD BUFFER</div>
+            <div style="background:rgba(255,255,255,0.06);border-radius:3px;height:14px;overflow:hidden;position:relative;">
+                <div id="dr-ext-rw-bar" style="height:100%;background:linear-gradient(90deg,#34d399,#22c55e);width:0%;transition:width 0.5s;border-radius:3px;"></div>
+                <span id="dr-ext-rw-label" style="position:absolute;top:0;left:6px;font-size:9px;color:white;text-shadow:0 0 3px #000;line-height:14px;">0/5000</span>
+            </div>
+        </div>
+        <div style="padding:6px 8px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);margin-bottom:3px;">OBS BUFFER</div>
+            <div style="background:rgba(255,255,255,0.06);border-radius:3px;height:14px;overflow:hidden;position:relative;">
+                <div id="dr-ext-obs-bar" style="height:100%;background:linear-gradient(90deg,#60a5fa,#3b82f6);width:0%;transition:width 0.5s;border-radius:3px;"></div>
+                <span id="dr-ext-obs-label" style="position:absolute;top:0;left:6px;font-size:9px;color:white;text-shadow:0 0 3px #000;line-height:14px;">0/1000</span>
+            </div>
+        </div>
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
         <button onclick="runDiagnostic('show_rssm')">RSSM + DREAMER</button>
         <button onclick="runImagination()">IMAGINATION</button>
@@ -4852,6 +4929,42 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <div class="wfops-detail" id="wfops-detail">
             <div class="wfops-detail-empty">Select a workflow, node, or connection to inspect metadata, resources, and execution context.</div>
         </div>
+    </div>
+</div>
+
+<!-- ═══════════════ GPU FLEET TAB ═══════════════ -->
+<div class="content" id="tab-gpufleet">
+    <div class="section-head">GPU FLEET</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:16px;">
+        <div style="text-align:center;padding:10px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Instances</div>
+            <div id="gf-ext-count" style="font-size:22px;font-weight:bold;color:#a78bfa;">0</div>
+        </div>
+        <div style="text-align:center;padding:10px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Rate</div>
+            <div id="gf-ext-rate" style="font-size:22px;font-weight:bold;color:#f59e0b;">$0.00/hr</div>
+        </div>
+        <div style="text-align:center;padding:10px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:9px;color:var(--vscode-descriptionForeground);text-transform:uppercase;">Spent</div>
+            <div id="gf-ext-spent" style="font-size:22px;font-weight:bold;color:#ef4444;">$0.00</div>
+        </div>
+    </div>
+    <div id="gf-ext-instances" style="margin-bottom:16px;">
+        <div style="padding:16px;text-align:center;color:var(--vscode-descriptionForeground);background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);">
+            <div style="font-size:20px;margin-bottom:6px;">🖥️</div>
+            <div>No active GPU instances</div>
+            <div style="font-size:9px;margin-top:6px;">Use vast_search and vast_rent to get started</div>
+        </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        <button onclick="vscode.postMessage({command:'vastInstances'})">REFRESH</button>
+        <button onclick="vscode.postMessage({command:'vastSearch',query:document.getElementById('gf-ext-query')?.value||'rentable=true'})">SEARCH</button>
+        <input id="gf-ext-query" placeholder="gpu_ram>=48 reliability>0.95" style="flex:1;font-size:10px;" />
+    </div>
+    <div id="gf-ext-search" style="font-size:10px;max-height:250px;overflow-y:auto;margin-bottom:12px;"></div>
+    <div class="section-head">RECENT ACTIVITY</div>
+    <div id="gf-ext-activity" style="font-size:10px;max-height:150px;overflow-y:auto;">
+        <div style="color:var(--vscode-descriptionForeground);">No recent Vast.ai activity</div>
     </div>
 </div>
 
@@ -5803,6 +5916,102 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 <script src="${svgPanZoomUri}"></script>
 ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
 <script src="${scriptUri}"></script>
+<script>
+(function(){
+    // ── Dreamer Vitals + GPU Fleet Updates ──
+    // Hook into the existing message system to update new UI elements
+    window.addEventListener('message', function(event) {
+        const msg = event.data;
+        if (msg.type === 'capsuleStatus' && msg.data) {
+            // Parse MCP result to get dreamer data
+            let status = msg.data;
+            if (typeof status === 'string') { try { status = JSON.parse(status); } catch(e) { return; } }
+            // Handle MCP envelope
+            if (status.content && Array.isArray(status.content)) {
+                try { status = JSON.parse(status.content[0].text); } catch(e) { return; }
+            }
+            const d = status.dreamer || {};
+            const el = (id) => document.getElementById(id);
+            const set = (id, v) => { const e = el(id); if (e) e.textContent = v; };
+
+            // Dreamer vitals
+            set('dr-ext-fitness', (d.fitness || 0).toFixed(6));
+            set('dr-ext-critic', (d.critic_value || 0).toFixed(4));
+            set('dr-ext-rewards', d.reward_count || 0);
+            set('dr-ext-cycles', d.training_cycles || 0);
+            const st = el('dr-ext-status');
+            if (st) {
+                st.textContent = d.active ? (d.causation_hold_active ? 'HOLD' : 'ACTIVE') : 'OFF';
+                st.style.color = d.active ? (d.causation_hold_active ? '#f59e0b' : '#22c55e') : '#ef4444';
+            }
+
+            // Buffer bars
+            const rwMax = 5000, obsMax = 1000;
+            const rwPct = Math.min(100, ((d.reward_buffer_size || 0) / rwMax) * 100);
+            const obsPct = Math.min(100, ((d.obs_buffer_size || 0) / obsMax) * 100);
+            const rwBar = el('dr-ext-rw-bar'); if (rwBar) rwBar.style.width = rwPct + '%';
+            set('dr-ext-rw-label', (d.reward_buffer_size || 0) + '/' + rwMax);
+            const obsBar = el('dr-ext-obs-bar'); if (obsBar) obsBar.style.width = obsPct + '%';
+            set('dr-ext-obs-label', (d.obs_buffer_size || 0) + '/' + obsMax);
+        }
+
+        // GPU Fleet results
+        if (msg.type === 'vastInstancesResult' && msg.data) {
+            const instances = Array.isArray(msg.data) ? msg.data : (msg.data.instances || []);
+            set('gf-ext-count', instances.length);
+            let rate = 0;
+            instances.forEach(i => { rate += (i.dph_total || i.cost_per_hr || 0); });
+            set('gf-ext-rate', '$' + rate.toFixed(3) + '/hr');
+
+            const container = el('gf-ext-instances');
+            if (!container) return;
+            if (instances.length === 0) {
+                container.innerHTML = '<div style="padding:16px;text-align:center;color:var(--vscode-descriptionForeground);background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);"><div style="font-size:20px;margin-bottom:6px;">🖥️</div><div>No active GPU instances</div></div>';
+                return;
+            }
+            const colors = ['#a78bfa','#22d3ee','#facc15','#34d399','#f9fafb','#60a5fa'];
+            let html = '';
+            instances.forEach((inst, idx) => {
+                const c = colors[idx % colors.length];
+                const id = inst.id || '?';
+                const status = inst.actual_status || inst.status || '?';
+                const gpu = (inst.gpu_name || 'GPU').replace(/_/g,' ');
+                const cost = inst.dph_total || inst.cost_per_hr || 0;
+                const icon = status === 'running' ? '🟢' : '🟡';
+                html += '<div style="padding:10px;border-left:3px solid '+c+';background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);margin-bottom:8px;">';
+                html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="font-weight:bold;color:'+c+';">'+icon+' '+id+'</span><span>'+status.toUpperCase()+'</span></div>';
+                html += '<div style="font-size:11px;margin-top:4px;">'+gpu+' &middot; $'+cost.toFixed(3)+'/hr</div>';
+                html += '<div style="display:flex;gap:4px;margin-top:6px;">';
+                html += '<button onclick="vscode.postMessage({command:\'vastConnect\',instanceId:\''+id+'\'})" style="font-size:9px;flex:1;">CONNECT</button>';
+                html += '<button onclick="vscode.postMessage({command:\'vastStop\',instanceId:\''+id+'\'})" style="font-size:9px;flex:1;opacity:0.7;">STOP</button>';
+                html += '</div></div>';
+            });
+            container.innerHTML = html;
+        }
+
+        if (msg.type === 'vastSearchResult' && msg.data) {
+            const out = el('gf-ext-search');
+            if (!out) return;
+            const offers = msg.data.offers || [];
+            if (offers.length === 0) { out.innerHTML = '<div style="color:var(--vscode-descriptionForeground);">No offers found</div>'; return; }
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:10px;">';
+            html += '<tr style="border-bottom:1px solid var(--vscode-panel-border);"><th style="text-align:left;padding:3px;">#</th><th>GPU</th><th>VRAM</th><th>$/hr</th><th>Rel%</th><th></th></tr>';
+            offers.forEach(o => {
+                html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">';
+                html += '<td style="padding:3px;">'+o.index+'</td><td>'+o.gpu+'</td><td>'+(o.vram_gb||0).toFixed(0)+'GB</td>';
+                html += '<td>$'+(o.price_hr||0).toFixed(3)+'</td><td>'+(o.reliability||0).toFixed(1)+'%</td>';
+                html += '<td><button onclick="vscode.postMessage({command:\'vastRent\',offerId:\''+o.id+'\'})" style="font-size:9px;padding:1px 6px;">RENT</button></td>';
+                html += '</tr>';
+            });
+            html += '</table>';
+            out.innerHTML = html;
+        }
+
+        function el(id) { return document.getElementById(id); }
+        function set(id, v) { const e = el(id); if (e) e.textContent = v; }
+    });
+})();
+</script>
 </body>
 </html>`;
     }

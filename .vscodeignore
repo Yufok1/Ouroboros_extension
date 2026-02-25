@@ -105,3 +105,7 @@ vscode-extension/**
 run_gemma_rag.py
 workflow_definition.json
 workflows/**
+Champion_Council/**
+media/*.m4a
+media/*.mp4
+.relay_center.cmd
