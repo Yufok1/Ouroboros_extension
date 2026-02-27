@@ -402,7 +402,8 @@ export class CouncilPanel {
             }
             case 'vastRent': {
                 try {
-                    const data = await this.mcp.callToolParsed('vast_rent', { offer_id: msg.offerId });
+                    const instanceId = msg.instanceId || msg.offerId;
+                    const data = await this.mcp.callToolParsed('vast_rent', { instance_id: instanceId });
                     this.send({ type: 'vastRentResult', data });
                 } catch (e: any) { this.send({ type: 'vastRentResult', data: { error: e.message } }); }
                 break;
@@ -419,6 +420,13 @@ export class CouncilPanel {
                     const data = await this.mcp.callToolParsed('vast_stop', { instance_id: msg.instanceId });
                     this.send({ type: 'vastStopResult', data });
                 } catch (e: any) { this.send({ type: 'vastStopResult', data: { error: e.message } }); }
+                break;
+            }
+            case 'vastReady': {
+                try {
+                    const data = await this.mcp.callToolParsed('vast_ready', { instance_id: msg.instanceId });
+                    this.send({ type: 'vastReadyResult', data });
+                } catch (e: any) { this.send({ type: 'vastReadyResult', data: { error: e.message } }); }
                 break;
             }
             // ── NOSTR COMMANDS ──
@@ -5947,6 +5955,74 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
 (function(){
     // ── Dreamer Vitals + GPU Fleet Updates ──
     // Hook into the existing message system to update new UI elements
+    const el = (id) => document.getElementById(id);
+    const set = (id, v) => { const e = el(id); if (e) e.textContent = v; };
+    let _gpuPollId = null;
+
+    function parseToolPayload(raw) {
+        if (!raw) return raw;
+        if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return raw; } }
+        if (raw.content && Array.isArray(raw.content) && raw.content[0]?.text) {
+            try { return JSON.parse(raw.content[0].text); } catch { return raw.content[0].text; }
+        }
+        return raw;
+    }
+
+    function normalizeInstances(payload) {
+        const parsed = parseToolPayload(payload);
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && typeof parsed === 'object') {
+            if (Array.isArray(parsed.instances)) return parsed.instances;
+            if (Array.isArray(parsed.data)) return parsed.data;
+            if (parsed.id || parsed.instance_id) return [parsed];
+        }
+        return [];
+    }
+
+    function extractOffers(payload) {
+        const parsed = parseToolPayload(payload);
+        if (parsed && Array.isArray(parsed.offers)) return parsed.offers;
+        if (Array.isArray(parsed)) return parsed;
+        return [];
+    }
+
+    function logGpuActivity(text, isError) {
+        const act = el('gf-ext-activity');
+        if (!act) return;
+        const color = isError ? '#ef4444' : 'var(--vscode-descriptionForeground)';
+        const ts = new Date().toLocaleTimeString();
+        act.innerHTML = '<div style="padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);"><span style="color:'+color+'">'+ts+' '+text+'</span></div>' + act.innerHTML;
+    }
+
+    function refreshGpuFleet() {
+        vscode.postMessage({ command: 'vastInstances' });
+    }
+
+    function startGpuPolling() {
+        if (_gpuPollId) return;
+        refreshGpuFleet();
+        _gpuPollId = setInterval(refreshGpuFleet, 10000);
+    }
+
+    function stopGpuPolling() {
+        if (_gpuPollId) { clearInterval(_gpuPollId); _gpuPollId = null; }
+    }
+
+    function syncGpuPolling() {
+        const gpuTab = el('tab-gpufleet');
+        if (gpuTab && gpuTab.classList.contains('active')) startGpuPolling();
+        else stopGpuPolling();
+    }
+
+    const wrapper = document.querySelector('.content-wrapper');
+    if (wrapper) {
+        new MutationObserver(syncGpuPolling).observe(wrapper, { attributes: true, subtree: true, attributeFilter: ['class'] });
+    }
+    document.querySelectorAll('.tab[data-tab="gpufleet"]').forEach(btn => {
+        btn.addEventListener('click', () => setTimeout(refreshGpuFleet, 100));
+    });
+    syncGpuPolling();
+
     window.addEventListener('message', function(event) {
         const msg = event.data;
         if (msg.type === 'capsuleStatus' && msg.data) {
@@ -5958,8 +6034,6 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
                 try { status = JSON.parse(status.content[0].text); } catch(e) { return; }
             }
             const d = status.dreamer || {};
-            const el = (id) => document.getElementById(id);
-            const set = (id, v) => { const e = el(id); if (e) e.textContent = v; };
 
             // Dreamer vitals
             set('dr-ext-fitness', (d.fitness || 0).toFixed(6));
@@ -5984,7 +6058,7 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
 
         // GPU Fleet results
         if (msg.type === 'vastInstancesResult' && msg.data) {
-            const instances = Array.isArray(msg.data) ? msg.data : (msg.data.instances || []);
+            const instances = normalizeInstances(msg.data);
             set('gf-ext-count', instances.length);
             let rate = 0;
             instances.forEach(i => { rate += (i.dph_total || i.cost_per_hr || 0); });
@@ -6000,16 +6074,18 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
             let html = '';
             instances.forEach((inst, idx) => {
                 const c = colors[idx % colors.length];
-                const id = inst.id || '?';
+                const id = String(inst.id ?? inst.instance_id ?? '?');
                 const status = inst.actual_status || inst.status || '?';
-                const gpu = (inst.gpu_name || 'GPU').replace(/_/g,' ');
+                const gpu = String(inst.gpu_name || inst.gpu || 'GPU').replace(/_/g,' ');
                 const cost = inst.dph_total || inst.cost_per_hr || 0;
                 const icon = status === 'running' ? '🟢' : '🟡';
                 html += '<div style="padding:10px;border-left:3px solid '+c+';background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--vscode-panel-border);margin-bottom:8px;">';
                 html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="font-weight:bold;color:'+c+';">'+icon+' '+id+'</span><span>'+status.toUpperCase()+'</span></div>';
                 html += '<div style="font-size:11px;margin-top:4px;">'+gpu+' &middot; $'+cost.toFixed(3)+'/hr</div>';
+                html += '<div style="font-size:10px;margin-top:4px;"><a href="https://cloud.vast.ai/instances/?instance_id=' + encodeURIComponent(id) + '" target="_blank" rel="noopener" style="color:#60a5fa;">Open in Vast Console</a> <span style="color:var(--vscode-descriptionForeground);">ID '+id+'</span></div>';
                 html += '<div style="display:flex;gap:4px;margin-top:6px;">';
                 html += '<button onclick="vscode.postMessage({command:&quot;vastConnect&quot;,instanceId:&quot;'+id+'&quot;})" style="font-size:9px;flex:1;">CONNECT</button>';
+                html += '<button onclick="vscode.postMessage({command:&quot;vastReady&quot;,instanceId:&quot;'+id+'&quot;})" style="font-size:9px;flex:1;">READY</button>';
                 html += '<button onclick="vscode.postMessage({command:&quot;vastStop&quot;,instanceId:&quot;'+id+'&quot;})" style="font-size:9px;flex:1;opacity:0.7;">STOP</button>';
                 html += '</div></div>';
             });
@@ -6019,23 +6095,28 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
         if (msg.type === 'vastSearchResult' && msg.data) {
             const out = el('gf-ext-search');
             if (!out) return;
-            const offers = msg.data.offers || [];
+            const offers = extractOffers(msg.data);
             if (offers.length === 0) { out.innerHTML = '<div style="color:var(--vscode-descriptionForeground);">No offers found</div>'; return; }
             let html = '<table style="width:100%;border-collapse:collapse;font-size:10px;">';
             html += '<tr style="border-bottom:1px solid var(--vscode-panel-border);"><th style="text-align:left;padding:3px;">#</th><th>GPU</th><th>VRAM</th><th>$/hr</th><th>Rel%</th><th></th></tr>';
             offers.forEach(o => {
                 html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">';
-                html += '<td style="padding:3px;">'+o.index+'</td><td>'+o.gpu+'</td><td>'+(o.vram_gb||0).toFixed(0)+'GB</td>';
-                html += '<td>$'+(o.price_hr||0).toFixed(3)+'</td><td>'+(o.reliability||0).toFixed(1)+'%</td>';
-                html += '<td><button onclick="vscode.postMessage({command:&quot;vastRent&quot;,offerId:&quot;'+o.id+'&quot;})" style="font-size:9px;padding:1px 6px;">RENT</button></td>';
+                const offerId = String(o.id ?? o.instance_id ?? o.offer_id ?? o.index ?? '');
+                html += '<td style="padding:3px;">'+(o.index ?? '')+'</td><td>'+(o.gpu ?? '?')+'</td><td>'+(Number(o.vram_gb||0)).toFixed(0)+'GB</td>';
+                html += '<td>$'+(Number(o.price_hr||0)).toFixed(3)+'</td><td>'+(Number(o.reliability||0)).toFixed(1)+'%</td>';
+                html += '<td><button onclick="vscode.postMessage({command:&quot;vastRent&quot;,instanceId:&quot;'+offerId+'&quot;})" style="font-size:9px;padding:1px 6px;">RENT</button></td>';
                 html += '</tr>';
             });
             html += '</table>';
             out.innerHTML = html;
         }
 
-        function el(id) { return document.getElementById(id); }
-        function set(id, v) { const e = el(id); if (e) e.textContent = v; }
+        if (msg.type === 'vastRentResult' || msg.type === 'vastConnectResult' || msg.type === 'vastStopResult' || msg.type === 'vastReadyResult') {
+            const parsed = parseToolPayload(msg.data);
+            if (parsed && parsed.error) logGpuActivity(parsed.error, true);
+            else logGpuActivity(msg.type.replace('Result', '') + ' ok', false);
+            setTimeout(refreshGpuFleet, 800);
+        }
     });
 })();
 </script>

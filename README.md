@@ -116,12 +116,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.9.2
+## What's New in 0.9.3
 
-- **Recompiled Champion Capsule** - Built from the latest compiled `champion_gen8.py` and re-compressed into `resources/capsule.gz` for distribution.
-- **Patch Release for Packaging** - Version bumped to `0.9.2` to allow clean VSIX/marketplace publish of this capsule refresh.
-- **Runtime Fixes Retained** - Includes prior 0.9.1 fixes for deliberation output shape, plugged-councilor metric accuracy, and RSSM/imagination consistency.
-- **Release Packaging Hardening** - `npm run package` always runs capsule compression first so `resources/capsule.gz` stays aligned with `champion_gen8.py`.
+- **Vast GPU Fleet Link Parity** - GPU instance cards now link directly to the specific rented Vast instance in console.
+- **Vast Rent Flow Consistency** - Frontend rent handling now consistently uses `instance_id` for extension/Space parity.
+- **Marketplace Version Bump** - Extension package bumped to `0.9.3` with aligned lockfile metadata.
+- **Fresh Build Artifact** - Extension recompiled and VSIX rebuilt for upload.
 
 See [CHANGELOG.md](https://github.com/Yufok1/Ouroboros_extension/blob/HEAD/CHANGELOG.md) for full release history.
 

@@ -2,6 +2,16 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.3] - 2026-02-27
+
+### Vast GPU Fleet Parity + Marketplace Rebuild
+
+- Fixed GPU Fleet Vast card links to open the specific rented instance directly in Vast Console (`?instance_id=...`).
+- Fixed frontend rent flow argument parity so rental actions consistently use `instance_id`.
+- Added/kept Vast action parity in the extension webview for rent/connect/ready/stop refresh behavior.
+- Bumped extension package version to `0.9.3` and aligned `package-lock.json` version metadata.
+- Recompiled extension and rebuilt VSIX for marketplace upload.
+
 ## [0.9.2] - 2026-02-27
 
 ### Recompiled Champion Refresh + Packaging Rebuild
