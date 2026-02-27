@@ -1245,6 +1245,10 @@ export class MCPServerManager {
                         settled = true;
                         clearTimeout(timer);
                         reject(new Error(`SSE stream error: ${err.message}`));
+                    } else if (this._status === 'running') {
+                        // Connection died after startup; force immediate session refresh.
+                        console.log('[MCP] SSE stream errored after connect, reconnecting...');
+                        this.reconnectSse();
                     }
                 });
             });
@@ -1537,7 +1541,17 @@ export class MCPServerManager {
                     if (res.statusCode && res.statusCode >= 400) {
                         this._pendingRequests.delete(id);
                         clearTimeout(timer);
+                        // 404/session errors mean our SSE session_id is stale; reconnect now.
+                        const bodyLower = String(data || '').toLowerCase();
+                        const staleSession = res.statusCode === 404 ||
+                            bodyLower.includes('session') ||
+                            bodyLower.includes('not found');
+                        if (staleSession && this._status === 'running') {
+                            console.warn(`[MCP] Session appears stale (HTTP ${res.statusCode}); reconnecting SSE`);
+                            this.reconnectSse();
+                        }
                         reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+                        return;
                     }
                     console.log(`[MCP] POST ${method} id=${id} -> HTTP ${res.statusCode}`);
                 });

@@ -6009,8 +6009,8 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
                 html += '<div style="display:flex;justify-content:space-between;font-size:11px;"><span style="font-weight:bold;color:'+c+';">'+icon+' '+id+'</span><span>'+status.toUpperCase()+'</span></div>';
                 html += '<div style="font-size:11px;margin-top:4px;">'+gpu+' &middot; $'+cost.toFixed(3)+'/hr</div>';
                 html += '<div style="display:flex;gap:4px;margin-top:6px;">';
-                html += '<button onclick="vscode.postMessage({command:\'vastConnect\',instanceId:\''+id+'\'})" style="font-size:9px;flex:1;">CONNECT</button>';
-                html += '<button onclick="vscode.postMessage({command:\'vastStop\',instanceId:\''+id+'\'})" style="font-size:9px;flex:1;opacity:0.7;">STOP</button>';
+                html += '<button onclick="vscode.postMessage({command:&quot;vastConnect&quot;,instanceId:&quot;'+id+'&quot;})" style="font-size:9px;flex:1;">CONNECT</button>';
+                html += '<button onclick="vscode.postMessage({command:&quot;vastStop&quot;,instanceId:&quot;'+id+'&quot;})" style="font-size:9px;flex:1;opacity:0.7;">STOP</button>';
                 html += '</div></div>';
             });
             container.innerHTML = html;
@@ -6027,7 +6027,7 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
                 html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">';
                 html += '<td style="padding:3px;">'+o.index+'</td><td>'+o.gpu+'</td><td>'+(o.vram_gb||0).toFixed(0)+'GB</td>';
                 html += '<td>$'+(o.price_hr||0).toFixed(3)+'</td><td>'+(o.reliability||0).toFixed(1)+'%</td>';
-                html += '<td><button onclick="vscode.postMessage({command:\'vastRent\',offerId:\''+o.id+'\'})" style="font-size:9px;padding:1px 6px;">RENT</button></td>';
+                html += '<td><button onclick="vscode.postMessage({command:&quot;vastRent&quot;,offerId:&quot;'+o.id+'&quot;})" style="font-size:9px;padding:1px 6px;">RENT</button></td>';
                 html += '</tr>';
             });
             html += '</table>';

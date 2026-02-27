@@ -2,6 +2,37 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.1] - 2026-02-27
+
+### Champion Capsule Contract + RSSM Reliability Update
+
+Release aligned to a newly compiled `champion_gen8.py` capsule with fixes for user-reported runtime regressions.
+
+**Deliberation Output Contract (HIGH)**
+- `deliberate` now returns human-readable output with:
+  - `result` (summary text)
+  - `reasoning_trace` (per-councilor confidence/plugged data)
+  - `metrics` (consensus method, voter count, plugged councilors, vector dim)
+- Fix applied in both deliberate tool paths (`_handle_mcp_request` and `@logged_tool deliberate`) to keep MCP behavior consistent across transports.
+
+**Plugged Councilor Metric Accuracy (HIGH)**
+- `plugged_councilors` now counts only slots with an actual plugged model instead of total council slots.
+- Deliberation response formatting now derives plugged count from the vote trace when available, preventing stale upstream counters from leaking into client-visible metrics.
+
+**RSSM/Imagination Consistency (HIGH)**
+- Dreamer activation now depends on real RSSM import + initialization success.
+- Imagination paths now consistently treat missing RSSM as unavailable real world model state and return deterministic diagnostic payloads (including `rssm_import_error` / `rssm_init_error`) instead of inconsistent behavior.
+- `get_status` and `show_rssm` now report Dreamer activity based on real RSSM readiness.
+
+**Packaging Workflow Hardening**
+- Build packaging now compresses the capsule before production build (`npm run package` runs `compress-capsule` first), ensuring `resources/capsule.gz` matches the current `champion_gen8.py`.
+
+### 0.9.1 Rebuild (No Version Bump)
+
+- Rebuilt extension package from a newly compiled `champion_gen8.py` and refreshed bundled `resources/capsule.gz`.
+- Dreamer reconstruct/import parity updated so `embodied` is loaded alongside `ninjax` and `elements` in all relevant RSSM import paths.
+- Missing-RSSM diagnostic payloads now include the complete dependency hint set: `jax`, `jaxlib`, `ninjax`, `embodied`, `elements`, `einops`.
+
 ## [0.9.0] - 2026-02-25
 
 ### GPU Fleet Tab + Dreamer Training Dashboard
