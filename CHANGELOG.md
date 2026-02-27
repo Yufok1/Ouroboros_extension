@@ -2,6 +2,14 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.2] - 2026-02-27
+
+### Recompiled Champion Refresh + Packaging Rebuild
+
+- Rebuilt extension from the newly compiled `champion_gen8.py` and regenerated bundled `resources/capsule.gz`.
+- Published as a patch bump to unblock marketplace packaging for this capsule refresh.
+- Maintains prior 0.9.1 runtime fixes (deliberation output contract, plugged councilor metrics, and RSSM/imagination consistency).
+
 ## [0.9.1] - 2026-02-27
 
 ### Champion Capsule Contract + RSSM Reliability Update

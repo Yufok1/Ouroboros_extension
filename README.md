@@ -116,14 +116,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.9.1
+## What's New in 0.9.2
 
-- **Deliberation Contract Fix** - `deliberate` now returns a human-readable `result` plus structured `reasoning_trace` and `metrics` instead of raw vector-first payloads.
-- **Accurate Council Metrics** - `plugged_councilors` now reflects actually plugged models, and deliberation formatting derives plugged counts from real vote traces.
-- **Real RSSM Imagination Enforcement** - Imagination paths now consistently gate on real RSSM availability and return deterministic diagnostic payloads when RSSM is unavailable.
-- **Champion Capsule Refresh (No Version Bump)** - `0.9.1` is rebuilt from the newly compiled `champion_gen8.py`, then re-compressed into `resources/capsule.gz` for packaged distribution.
-- **Dreamer Import Alignment** - Dreamer reconstruction/import paths are aligned for `ninjax`, `embodied`, and `elements`, and missing-RSSM diagnostics now report the full dependency set expected at runtime.
-- **Release Packaging Hardening** - `npm run package` now always runs capsule compression first so `resources/capsule.gz` stays aligned with `champion_gen8.py`.
+- **Recompiled Champion Capsule** - Built from the latest compiled `champion_gen8.py` and re-compressed into `resources/capsule.gz` for distribution.
+- **Patch Release for Packaging** - Version bumped to `0.9.2` to allow clean VSIX/marketplace publish of this capsule refresh.
+- **Runtime Fixes Retained** - Includes prior 0.9.1 fixes for deliberation output shape, plugged-councilor metric accuracy, and RSSM/imagination consistency.
+- **Release Packaging Hardening** - `npm run package` always runs capsule compression first so `resources/capsule.gz` stays aligned with `champion_gen8.py`.
 
 See [CHANGELOG.md](https://github.com/Yufok1/Ouroboros_extension/blob/HEAD/CHANGELOG.md) for full release history.
 
