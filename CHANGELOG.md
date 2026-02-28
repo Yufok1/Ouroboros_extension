@@ -2,6 +2,15 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.4] - 2026-02-28
+
+### Dynamic Host Capacity Guardrails
+
+- Added live host-capacity preflight for `plug_model` and `hub_plug` in the extension MCP call path.
+- Added runtime memory/GPU snapshot collection (RAM utilization and NVIDIA VRAM telemetry when available).
+- Added hard-stop behavior for high-risk plug attempts under constrained resources, with explicit override via `allow_oom_risk: true`.
+- Updated release docs and package metadata for marketplace upload.
+
 ## [0.9.3] - 2026-02-27
 
 ### Vast GPU Fleet Parity + Marketplace Rebuild

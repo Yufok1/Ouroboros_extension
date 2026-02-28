@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as zlib from 'zlib';
+import * as os from 'os';
 
 // Tool category → tool name mapping (146 tools across 21 categories)
 export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] }> = {
@@ -160,6 +161,11 @@ export class MCPServerManager {
     private static readonly CACHE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30 min
     private static readonly LOG_MAX_SIZE = 5 * 1024 * 1024; // 5MB
     private static readonly LOG_KEEP_SIZE = 1 * 1024 * 1024; // keep last 1MB
+    private _capacitySnapshotCache: { data: any | null; ts: number } = { data: null, ts: 0 };
+    private static readonly CAPACITY_CACHE_TTL_MS = 3000;
+    private static readonly CAPACITY_GUARD_TOOLS = new Set(['plug_model', 'hub_plug']);
+    private static readonly CAPACITY_RAM_BLOCK_PCT = 92;
+    private static readonly CAPACITY_GPU_FREE_MIN_GB = 2;
 
     constructor(private context: vscode.ExtensionContext) {}
 
@@ -1568,6 +1574,151 @@ export class MCPServerManager {
         });
     }
 
+    private async probeNvidiaSmi(): Promise<any> {
+        return new Promise((resolve) => {
+            child_process.execFile(
+                'nvidia-smi',
+                ['--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits'],
+                { timeout: 2000, windowsHide: true },
+                (err, stdout) => {
+                    if (err || !stdout) {
+                        resolve({
+                            available: false,
+                            provider: 'none',
+                            count: 0,
+                            names: [],
+                            total_gb: null,
+                            used_gb: null,
+                            free_gb: null,
+                            utilization_pct: null
+                        });
+                        return;
+                    }
+
+                    const lines = String(stdout).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                    let totalMb = 0;
+                    let usedMb = 0;
+                    let freeMb = 0;
+                    const utilValues: number[] = [];
+                    const names: string[] = [];
+                    for (const line of lines) {
+                        const parts = line.split(',').map(p => p.trim());
+                        if (parts.length < 5) { continue; }
+                        const total = Number(parts[1]);
+                        const used = Number(parts[2]);
+                        const free = Number(parts[3]);
+                        const util = Number(parts[4]);
+                        if (!Number.isFinite(total) || !Number.isFinite(used) || !Number.isFinite(free)) { continue; }
+                        names.push(parts[0]);
+                        totalMb += total;
+                        usedMb += used;
+                        freeMb += free;
+                        if (Number.isFinite(util)) { utilValues.push(util); }
+                    }
+
+                    if (totalMb <= 0) {
+                        resolve({
+                            available: false,
+                            provider: 'nvidia-smi',
+                            count: 0,
+                            names: [],
+                            total_gb: null,
+                            used_gb: null,
+                            free_gb: null,
+                            utilization_pct: null
+                        });
+                        return;
+                    }
+
+                    const utilAvg = utilValues.length ? utilValues.reduce((a, b) => a + b, 0) / utilValues.length : null;
+                    resolve({
+                        available: true,
+                        provider: 'nvidia-smi',
+                        count: names.length,
+                        names,
+                        total_gb: Number((totalMb / 1024).toFixed(3)),
+                        used_gb: Number((usedMb / 1024).toFixed(3)),
+                        free_gb: Number((freeMb / 1024).toFixed(3)),
+                        utilization_pct: utilAvg == null ? null : Number(utilAvg.toFixed(2))
+                    });
+                }
+            );
+        });
+    }
+
+    private async getRuntimeCapacitySnapshot(force = false): Promise<any> {
+        const now = Date.now();
+        if (!force && this._capacitySnapshotCache.data && (now - this._capacitySnapshotCache.ts) < MCPServerManager.CAPACITY_CACHE_TTL_MS) {
+            return this._capacitySnapshotCache.data;
+        }
+
+        const totalBytes = os.totalmem();
+        const freeBytes = os.freemem();
+        const usedBytes = Math.max(totalBytes - freeBytes, 0);
+        const usedPercent = totalBytes > 0 ? Number(((usedBytes / totalBytes) * 100).toFixed(2)) : null;
+        const gb = (value: number) => Number((value / (1024 ** 3)).toFixed(3));
+        const gpu = await this.probeNvidiaSmi();
+
+        const snapshot = {
+            timestamp: new Date().toISOString(),
+            runtime: 'vscode_extension',
+            memory: {
+                total_bytes: totalBytes,
+                used_bytes: usedBytes,
+                free_bytes: freeBytes,
+                used_percent: usedPercent,
+                total_gb: gb(totalBytes),
+                used_gb: gb(usedBytes),
+                free_gb: gb(freeBytes),
+            },
+            gpu,
+            cpu: {
+                cores: os.cpus()?.length || 0,
+                load1: os.loadavg()[0] || 0,
+            },
+            guard: {
+                mode: 'enforce',
+                tools: Array.from(MCPServerManager.CAPACITY_GUARD_TOOLS),
+                ram_block_pct: MCPServerManager.CAPACITY_RAM_BLOCK_PCT,
+                gpu_free_min_gb: MCPServerManager.CAPACITY_GPU_FREE_MIN_GB,
+            }
+        };
+
+        this._capacitySnapshotCache = { data: snapshot, ts: now };
+        return snapshot;
+    }
+
+    private evaluateCapacityGuard(toolName: string, args: Record<string, any>, snapshot: any): { action: 'allow' | 'block'; reasons: string[]; bypassed: boolean } {
+        const decision: { action: 'allow' | 'block'; reasons: string[]; bypassed: boolean } = {
+            action: 'allow',
+            reasons: [],
+            bypassed: false,
+        };
+        if (!MCPServerManager.CAPACITY_GUARD_TOOLS.has(toolName)) {
+            return decision;
+        }
+        if (Boolean(args?.allow_oom_risk)) {
+            decision.bypassed = true;
+            return decision;
+        }
+
+        const memUsedPct = Number(snapshot?.memory?.used_percent);
+        if (Number.isFinite(memUsedPct) && memUsedPct >= MCPServerManager.CAPACITY_RAM_BLOCK_PCT) {
+            decision.reasons.push(`RAM pressure ${memUsedPct.toFixed(2)}% >= ${MCPServerManager.CAPACITY_RAM_BLOCK_PCT.toFixed(2)}%`);
+        }
+
+        const gpuAvailable = Boolean(snapshot?.gpu?.available);
+        const gpuFreeGb = Number(snapshot?.gpu?.free_gb);
+        if (gpuAvailable && Number.isFinite(gpuFreeGb) && gpuFreeGb < MCPServerManager.CAPACITY_GPU_FREE_MIN_GB) {
+            decision.reasons.push(`GPU free VRAM ${gpuFreeGb.toFixed(3)}GB < ${MCPServerManager.CAPACITY_GPU_FREE_MIN_GB.toFixed(3)}GB`);
+        }
+
+        if (decision.reasons.length > 0) {
+            decision.action = 'block';
+        }
+        return decision;
+    }
+
     /** Call an MCP tool */
     async callTool(toolName: string, args: Record<string, any>, options: CallToolOptions = {}): Promise<any> {
         if (this._status !== 'running') {
@@ -1579,6 +1730,29 @@ export class MCPServerManager {
         const startTime = Date.now();
         const category = this.getCategoryForTool(toolName);
         this.rememberLocalToolCall(toolName, options);
+        const shouldGuard = MCPServerManager.CAPACITY_GUARD_TOOLS.has(toolName);
+        let capacitySnapshot: any = null;
+        let capacityGuard: { action: 'allow' | 'block'; reasons: string[]; bypassed: boolean } | null = null;
+        if (shouldGuard) {
+            capacitySnapshot = await this.getRuntimeCapacitySnapshot();
+            capacityGuard = this.evaluateCapacityGuard(toolName, args || {}, capacitySnapshot);
+            if (capacityGuard.action === 'block') {
+                const msg = `Capacity guard blocked ${toolName}: ${capacityGuard.reasons.join('; ')}`;
+                if (!suppressActivity) {
+                    this.emitActivity({
+                        timestamp: Date.now(),
+                        tool: toolName,
+                        category,
+                        args,
+                        result: { capacity_guard: capacityGuard, runtime_capacity: capacitySnapshot },
+                        error: msg,
+                        durationMs: 0,
+                        source
+                    });
+                }
+                throw new Error(msg);
+            }
+        }
 
         // Emit a "started" event for long-running tools so UI can show progress
         const LONG_RUNNING_TOOLS = ['plug_model', 'hub_plug', 'hub_download'];
@@ -1608,7 +1782,7 @@ export class MCPServerManager {
                     tool: toolName,
                     category,
                     args,
-                    result,
+                    result: shouldGuard ? { result, capacity_guard: capacityGuard, runtime_capacity: capacitySnapshot } : result,
                     durationMs,
                     source
                 });

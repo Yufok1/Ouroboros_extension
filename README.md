@@ -116,11 +116,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.9.3
+## What's New in 0.9.4
 
-- **Vast GPU Fleet Link Parity** - GPU instance cards now link directly to the specific rented Vast instance in console.
-- **Vast Rent Flow Consistency** - Frontend rent handling now consistently uses `instance_id` for extension/Space parity.
-- **Marketplace Version Bump** - Extension package bumped to `0.9.3` with aligned lockfile metadata.
+- **Host Capacity Guardrails** - Added live capacity preflight before `plug_model` / `hub_plug` to reduce OOM risk during model loading.
+- **Dynamic Runtime Snapshot** - Runtime capacity telemetry now includes RAM pressure and GPU VRAM availability to drive safer orchestration decisions.
+- **Controlled Override Path** - Explicit `allow_oom_risk: true` bypass is available when you intentionally want to force a risky plug attempt.
+- **Marketplace Version Bump** - Extension package bumped to `0.9.4` with aligned lockfile metadata.
 - **Fresh Build Artifact** - Extension recompiled and VSIX rebuilt for upload.
 
 See [CHANGELOG.md](https://github.com/Yufok1/Ouroboros_extension/blob/HEAD/CHANGELOG.md) for full release history.
