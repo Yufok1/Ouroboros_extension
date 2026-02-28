@@ -40,6 +40,8 @@ export class CouncilPanel {
 
     private repChains: Map<string, ReputationChain> = new Map();
 
+    private slotTerminals: Map<number, import('child_process').ChildProcess> = new Map();
+
     constructor(
         private extensionUri: vscode.Uri,
         private mcp: MCPServerManager,
@@ -142,6 +144,9 @@ export class CouncilPanel {
         const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js');
         const svgPanZoomPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'svg-pan-zoom.min.js');
         const peerjsPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'peerjs.min.js');
+        const xtermPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'xterm.js');
+        const xtermFitPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'xterm-addon-fit.js');
+        const xtermWebLinksPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'xterm-addon-web-links.js');
 
         this.panel = vscode.window.createWebviewPanel(
             'championCouncil', 'Champion Council', vscode.ViewColumn.One,
@@ -156,7 +161,10 @@ export class CouncilPanel {
         const scriptUri = this.panel.webview.asWebviewUri(mediaPath);
         const svgPanZoomUri = this.panel.webview.asWebviewUri(svgPanZoomPath);
         const peerjsUri = this.panel.webview.asWebviewUri(peerjsPath);
-        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource);
+        const xtermUri = this.panel.webview.asWebviewUri(xtermPath);
+        const xtermFitUri = this.panel.webview.asWebviewUri(xtermFitPath);
+        const xtermWebLinksUri = this.panel.webview.asWebviewUri(xtermWebLinksPath);
+        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource, xtermUri, xtermFitUri, xtermWebLinksUri);
 
         this.panel.webview.onDidReceiveMessage(
             (msg) => {
@@ -1456,6 +1464,36 @@ export class CouncilPanel {
                 break;
             }
 
+            // ── Slot Drill-In Terminal ───────────────────────────────
+            case 'spawnSlotTerminal': {
+                const slotIdx = msg.slotIndex as number;
+                this.spawnSlotTerminal(slotIdx);
+                break;
+            }
+            case 'slotTerminalInput': {
+                const proc = this.slotTerminals?.get(msg.slotIndex);
+                if (proc && proc.stdin && !proc.killed) {
+                    proc.stdin.write(msg.data);
+                }
+                break;
+            }
+            case 'killSlotTerminal': {
+                const proc2 = this.slotTerminals?.get(msg.slotIndex);
+                if (proc2 && !proc2.killed) {
+                    proc2.kill();
+                }
+                this.slotTerminals?.delete(msg.slotIndex);
+                break;
+            }
+            case 'requestSlotMetrics': {
+                const si = msg.slotIndex as number;
+                if (this.evaluator) {
+                    const metrics = this.evaluator.evaluate(si);
+                    this.send({ type: 'slotEvalMetrics', slotIndex: si, metrics });
+                }
+                break;
+            }
+
             // ── Reputation Chain ─────────────────────────────────────
 
             case 'repChainAppend': {
@@ -1669,6 +1707,146 @@ export class CouncilPanel {
                 break;
             }
         }
+    }
+
+    private async spawnSlotTerminal(slotIndex: number) {
+        // Kill existing terminal for this slot
+        const existing = this.slotTerminals.get(slotIndex);
+        if (existing && !existing.killed) { existing.kill(); }
+
+        const cp = require('child_process') as typeof import('child_process');
+        const os = require('os') as typeof import('os');
+        const isWin = process.platform === 'win32';
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+
+        // Get slot info from capsule to determine provider type
+        let slotInfo: any = null;
+        try {
+            slotInfo = await this.callToolParsed('slot_info', { slot: slotIndex }, { suppressActivity: true, source: 'internal' });
+        } catch { /* slot_info may fail if capsule isn't running */ }
+
+        const modelSource = slotInfo?.model_source || slotInfo?.model_id || slotInfo?.name || '';
+        const isRemoteUrl = modelSource.startsWith('http://') || modelSource.startsWith('https://');
+
+        // Detect Pi CLI availability
+        let piCmd = '';
+        try {
+            cp.execSync(isWin ? 'where pi' : 'which pi', { stdio: 'ignore' });
+            piCmd = 'pi';
+        } catch {
+            try {
+                cp.execSync('npx --yes @mariozechner/pi-coding-agent --version', { stdio: 'ignore', timeout: 15000 });
+                piCmd = 'npx @mariozechner/pi-coding-agent';
+            } catch { /* Pi not available */ }
+        }
+
+        let proc: import('child_process').ChildProcess;
+
+        if (piCmd) {
+            // Generate per-slot Pi config in a temp directory
+            const tmpDir = path.join(os.tmpdir(), `champion-pi-slot-${slotIndex}`);
+            try { fs.mkdirSync(tmpDir, { recursive: true }); } catch { /* exists */ }
+
+            // Determine the API base URL and model name
+            const apiPort = vscode.workspace.getConfiguration('champion').get<number>('mcpPort', 8765);
+            const apiBase = `http://localhost:8420/v1`;
+
+            // Build models.json for this slot
+            const modelsConfig: any = { providers: {} };
+
+            if (isRemoteUrl) {
+                // Remote provider — parse URL for base, model, key
+                const url = new URL(modelSource.split('?')[0]);
+                const params = new URLSearchParams(modelSource.includes('?') ? modelSource.split('?')[1] : '');
+                const remoteModel = params.get('model') || 'default';
+                const remoteKey = params.get('key') || 'none';
+                const providerName = `slot-${slotIndex}-remote`;
+
+                modelsConfig.providers[providerName] = {
+                    baseUrl: url.origin + url.pathname,
+                    api: 'openai-completions',
+                    apiKey: remoteKey,
+                    models: [{ id: remoteModel, name: modelSource.substring(0, 60) }]
+                };
+
+                // Write config
+                fs.writeFileSync(path.join(tmpDir, 'models.json'), JSON.stringify(modelsConfig, null, 2));
+
+                // Launch Pi with the remote provider
+                const piArgs = piCmd === 'pi' ? [] : ['@mariozechner/pi-coding-agent'];
+                proc = cp.spawn(piCmd === 'pi' ? 'pi' : 'npx', [
+                    ...piArgs,
+                    '--provider', providerName,
+                    '--model', remoteModel
+                ], {
+                    env: { ...process.env, TERM: 'xterm-256color', PI_CONFIG_DIR: tmpDir },
+                    cwd,
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                    shell: true
+                });
+            } else {
+                // Local model via capsule API bridge
+                const slotModel = modelSource || `slot-${slotIndex}`;
+                const providerName = `capsule-slot-${slotIndex}`;
+
+                modelsConfig.providers[providerName] = {
+                    baseUrl: apiBase,
+                    api: 'openai-completions',
+                    apiKey: 'local',
+                    models: [{ id: `slot-${slotIndex}`, name: slotModel }]
+                };
+
+                fs.writeFileSync(path.join(tmpDir, 'models.json'), JSON.stringify(modelsConfig, null, 2));
+
+                const piArgs = piCmd === 'pi' ? [] : ['@mariozechner/pi-coding-agent'];
+                proc = cp.spawn(piCmd === 'pi' ? 'pi' : 'npx', [
+                    ...piArgs,
+                    '--provider', providerName,
+                    '--model', `slot-${slotIndex}`
+                ], {
+                    env: { ...process.env, TERM: 'xterm-256color', PI_CONFIG_DIR: tmpDir },
+                    cwd,
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                    shell: true
+                });
+            }
+        } else {
+            // Fallback: bare shell with helpful message
+            const shell = isWin ? 'cmd.exe' : (process.env.SHELL || '/bin/bash');
+            const shellArgs = isWin ? [] : ['-i'];
+
+            proc = cp.spawn(shell, shellArgs, {
+                env: { ...process.env, TERM: 'xterm-256color' },
+                cwd,
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+
+            // Send a hint about installing Pi
+            this.send({
+                type: 'slotTerminalOutput', slotIndex,
+                data: '\x1b[33mPi CLI not found. Install for interactive model access:\x1b[0m\r\n' +
+                    '  npm install -g @mariozechner/pi-coding-agent\r\n\r\n' +
+                    '\x1b[90mFalling back to shell. You can run Pi manually:\x1b[0m\r\n' +
+                    `  pi --provider openai-compatible --baseUrl http://localhost:8420/v1 --model slot-${slotIndex}\r\n\r\n`
+            });
+        }
+
+        this.slotTerminals.set(slotIndex, proc);
+
+        proc.stdout?.on('data', (data: Buffer) => {
+            this.send({ type: 'slotTerminalOutput', slotIndex, data: data.toString() });
+        });
+
+        proc.stderr?.on('data', (data: Buffer) => {
+            this.send({ type: 'slotTerminalOutput', slotIndex, data: data.toString() });
+        });
+
+        proc.on('exit', (code: number | null) => {
+            this.send({ type: 'slotTerminalExited', slotIndex, code: code || 0 });
+            this.slotTerminals.delete(slotIndex);
+        });
+
+        this.send({ type: 'slotTerminalReady', slotIndex });
     }
 
     private getActiveWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
@@ -2621,8 +2799,15 @@ export class CouncilPanel {
     // HTML Generation - Operations Facility UI
     // ═══════════════════════════════════════════════════════════════
 
-    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string): string {
+    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string, xtermUri?: vscode.Uri, xtermFitUri?: vscode.Uri, xtermWebLinksUri?: vscode.Uri): string {
         const toolRegistryJSON = JSON.stringify(TOOL_CATEGORIES);
+
+        // Read xterm.css for inline injection
+        let xtermCSS = '';
+        try {
+            const xtermCssPath = path.join(this.extensionUri.fsPath, 'media', 'xterm.css');
+            xtermCSS = fs.readFileSync(xtermCssPath, 'utf-8');
+        } catch { /* xterm CSS not available — terminal will still work with basic styling */ }
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -2958,6 +3143,11 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
 .slot-card.occupied {
     border-color: var(--accent);
     border-left-width: 3px;
+    cursor: pointer;
+}
+.slot-card.occupied:hover {
+    background: var(--surface2);
+    border-color: var(--green);
 }
 .slot-card.plugging {
     border-color: var(--amber);
@@ -3074,6 +3264,155 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     0% { transform: translateX(-100%); width: 40%; }
     50% { transform: translateX(100%); width: 60%; }
     100% { transform: translateX(250%); width: 40%; }
+}
+
+/* ── SLOT DRILL-IN ── */
+.slot-drill { display: none; }
+.slot-drill.active { display: flex; flex-direction: column; gap: 12px; }
+.slot-drill-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+.slot-drill-back {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border: 1px solid var(--accent);
+    padding: 3px 10px;
+    background: none;
+    font-family: var(--mono);
+}
+.slot-drill-back:hover { background: var(--accent); color: var(--surface); }
+.slot-drill-identity { flex: 1; }
+.slot-drill-model {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 2px;
+}
+.slot-drill-meta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 9px;
+    color: var(--text-dim);
+}
+.slot-drill-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-weight: 700;
+}
+.slot-drill-badge.anthropic { border-color: #d4a574; color: #d4a574; }
+.slot-drill-badge.openai { border-color: #74d4a5; color: #74d4a5; }
+.slot-drill-badge.google { border-color: #4488ff; color: #4488ff; }
+.slot-drill-badge.local { border-color: var(--accent); color: var(--accent); }
+.slot-drill-badge.huggingface { border-color: #ffcc00; color: #ffcc00; }
+.slot-drill-badge.remote { border-color: #cc88ff; color: #cc88ff; }
+.slot-drill-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+}
+.slot-metric-card {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+.slot-metric-label {
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-dim);
+    margin-bottom: 2px;
+}
+.slot-metric-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--accent);
+}
+.slot-metric-value.warn { color: var(--amber); }
+.slot-metric-value.bad { color: var(--red); }
+.slot-drill-activity {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    max-height: 200px;
+    overflow-y: auto;
+}
+.slot-drill-activity-head {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.slot-activity-item {
+    padding: 5px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.slot-activity-item:last-child { border-bottom: none; }
+.slot-activity-source {
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+.slot-activity-source.mcp { border-color: var(--accent); color: var(--accent); }
+.slot-activity-source.terminal { border-color: var(--blue); color: var(--blue); }
+.slot-activity-source.workflow { border-color: var(--amber); color: var(--amber); }
+.slot-activity-tool { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.slot-activity-preview { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.slot-activity-latency { color: var(--text-dim); white-space: nowrap; }
+.slot-activity-status { font-size: 9px; }
+.slot-activity-status.ok { color: var(--green); }
+.slot-activity-status.fail { color: var(--red); }
+.slot-drill-terminal-wrap {
+    border: 1px solid var(--border);
+    background: #000;
+    min-height: 300px;
+    position: relative;
+}
+.slot-drill-terminal-head {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.slot-drill-terminal {
+    height: 320px;
+    padding: 4px;
+}
+.slot-drill-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 
 /* ── MEMORY TAB ── */
@@ -4594,6 +4933,9 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 .dvm-job-list { padding: 12px; }
 .dvm-job-card { border: 1px solid var(--border); padding: 10px; margin-bottom: 8px; background: var(--surface); }
 .dvm-result { margin-top: 8px; padding: 8px; background: var(--surface2); border: 1px solid var(--border); font-size: 10px; white-space: pre-wrap; }
+
+/* ── XTERM.JS TERMINAL ── */
+${xtermCSS}
 </style>
 </head>
 <body>
@@ -4720,22 +5062,53 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 
 <!-- ═══════════════ COUNCIL TAB ═══════════════ -->
 <div class="content" id="tab-council">
-    <div class="section-head" id="council-grid-title">COUNCIL GRID</div>
-    <div class="council-state-legend">
-        <span class="legend-item"><span class="dot green"></span>Plugged</span>
-        <span class="legend-item"><span class="dot amber pulse"></span>Plugging</span>
-        <span class="legend-item"><span class="dot off"></span>Empty</span>
+    <!-- GRID VIEW (default) -->
+    <div id="council-grid-view">
+        <div class="section-head" id="council-grid-title">COUNCIL GRID</div>
+        <div class="council-state-legend">
+            <span class="legend-item"><span class="dot green"></span>Plugged</span>
+            <span class="legend-item"><span class="dot amber pulse"></span>Plugging</span>
+            <span class="legend-item"><span class="dot off"></span>Empty</span>
+        </div>
+        <div class="slots-grid" id="slots-grid"></div>
+        <div class="council-controls">
+            <button onclick="openPlugModal()">PLUG MODEL</button>
+            <button onclick="openPlugProviderModal()">PLUG PROVIDER</button>
+            <button onclick="callTool('list_slots',{})">REFRESH SLOTS</button>
+            <button onclick="callTool('council_status',{})">CONSENSUS STATUS</button>
+            <button class="btn-dim" onclick="callTool('all_slots',{})">INVOKE ALL</button>
+        </div>
+        <div class="diag-section" style="margin-top:16px;">
+            <div class="diag-title">COUNCIL OUTPUT</div>
+            <div class="diag-output" id="council-output" style="min-height:60px;">Run a council command above.</div>
+        </div>
     </div>
-    <div class="slots-grid" id="slots-grid"></div>
-    <div class="council-controls">
-        <button onclick="openPlugModal()">PLUG MODEL</button>
-        <button onclick="callTool('list_slots',{})">REFRESH SLOTS</button>
-        <button onclick="callTool('council_status',{})">CONSENSUS STATUS</button>
-        <button class="btn-dim" onclick="callTool('all_slots',{})">INVOKE ALL</button>
-    </div>
-    <div class="diag-section" style="margin-top:16px;">
-        <div class="diag-title">COUNCIL OUTPUT</div>
-        <div class="diag-output" id="council-output" style="min-height:60px;">Run a council command above.</div>
+    <!-- DRILL-IN VIEW (shown when a slot card is clicked) -->
+    <div class="slot-drill" id="slot-drill-view">
+        <div class="slot-drill-header">
+            <button class="slot-drill-back" id="slot-drill-back">← GRID</button>
+            <div class="slot-drill-identity">
+                <div class="slot-drill-model" id="slot-drill-model">—</div>
+                <div class="slot-drill-meta" id="slot-drill-meta"></div>
+            </div>
+            <div id="slot-drill-badges"></div>
+        </div>
+        <div class="slot-drill-metrics" id="slot-drill-metrics"></div>
+        <div class="slot-drill-actions" id="slot-drill-actions"></div>
+        <div class="slot-drill-activity" id="slot-drill-activity">
+            <div class="slot-drill-activity-head">
+                <span>ACTIVITY FEED</span>
+                <span id="slot-drill-activity-count">0 events</span>
+            </div>
+            <div id="slot-drill-activity-list"></div>
+        </div>
+        <div class="slot-drill-terminal-wrap" id="slot-drill-terminal-wrap">
+            <div class="slot-drill-terminal-head">
+                <span>INTERACTIVE TERMINAL</span>
+                <span id="slot-drill-terminal-status">disconnected</span>
+            </div>
+            <div class="slot-drill-terminal" id="slot-drill-terminal"></div>
+        </div>
     </div>
 </div>
 
@@ -5925,6 +6298,37 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     </div>
 </div>
 
+<!-- ═══════════════ PLUG PROVIDER MODAL ═══════════════ -->
+<div class="modal-overlay" id="plug-provider-modal">
+    <div class="modal">
+        <div class="modal-title">PLUG REMOTE PROVIDER</div>
+        <div style="font-size:9px;color:var(--text-dim);margin-bottom:10px;">
+            Connect any OpenAI-compatible endpoint as a council slot.
+            Claude, Gemini, GPT-4, Mistral, Ollama — anything with a /v1/chat/completions endpoint.
+        </div>
+        <div class="field">
+            <label>Provider URL</label>
+            <input id="plug-provider-url" placeholder="https://api.anthropic.com/v1 or http://localhost:11434/v1" />
+        </div>
+        <div class="field">
+            <label>API Key (optional — appended as ?key=...)</label>
+            <input id="plug-provider-key" placeholder="sk-..." type="password" />
+        </div>
+        <div class="field">
+            <label>Model Name (optional — appended as ?model=...)</label>
+            <input id="plug-provider-model" placeholder="claude-sonnet-4-20250514" />
+        </div>
+        <div class="field">
+            <label>Slot Name (optional)</label>
+            <input id="plug-provider-slot-name" placeholder="claude-sonnet" />
+        </div>
+        <div class="modal-actions">
+            <button onclick="doPlugProvider()">PLUG PROVIDER</button>
+            <button class="btn-dim" onclick="closeModals()">CANCEL</button>
+        </div>
+    </div>
+</div>
+
 <!-- ═══════════════ INDUCT MODAL ═══════════════ -->
 <div class="modal-overlay" id="induct-modal">
     <div class="modal">
@@ -5950,6 +6354,9 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 <script>window.__CATEGORIES__ = ${toolRegistryJSON};</script>
 <script src="${svgPanZoomUri}"></script>
 ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
+${xtermUri ? `<script src="${xtermUri}"></script>` : ''}
+${xtermFitUri ? `<script src="${xtermFitUri}"></script>` : ''}
+${xtermWebLinksUri ? `<script src="${xtermWebLinksUri}"></script>` : ''}
 <script src="${scriptUri}"></script>
 <script>
 (function(){

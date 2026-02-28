@@ -29,6 +29,10 @@
     let _wfColorCache = {};     // workflowId -> '#rrggbb'
     let _wfColorIndex = 0;
 
+    // ── SLOT DRILL-IN STATE ──
+    let _slotDrill = { active: false, slotIndex: -1, term: null, termFit: null };
+    let _slotDrillActivity = []; // per-slot activity entries
+
     // ── NIP-88: POLL STATE ──
     var _polls = {}; // pollId -> { question, options, votes, voted, expired }
     var _pollVotes = {}; // pollId -> { optionIndex -> count }
@@ -706,6 +710,36 @@
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
                     break;
+                case 'slotTerminalOutput':
+                    if (_slotDrill.active && _slotDrill.term && msg.slotIndex === _slotDrill.slotIndex) {
+                        _slotDrill.term.write(msg.data);
+                    }
+                    break;
+                case 'slotTerminalReady':
+                    if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex) {
+                        var stEl = document.getElementById('slot-drill-terminal-status');
+                        if (stEl) stEl.textContent = 'connected';
+                        if (_slotDrill.term) {
+                            _slotDrill.term.writeln('\x1b[32m● Terminal connected\x1b[0m');
+                            _slotDrill.term.writeln('');
+                        }
+                    }
+                    break;
+                case 'slotTerminalExited':
+                    if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex) {
+                        var stEl2 = document.getElementById('slot-drill-terminal-status');
+                        if (stEl2) stEl2.textContent = 'disconnected';
+                        if (_slotDrill.term) {
+                            _slotDrill.term.writeln('');
+                            _slotDrill.term.writeln('\x1b[31m● Terminal process exited (code: ' + (msg.code || 0) + ')\x1b[0m');
+                        }
+                    }
+                    break;
+                case 'slotEvalMetrics':
+                    if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex && msg.metrics) {
+                        _updateSlotMetricsFromEval(msg.metrics);
+                    }
+                    break;
                 case 'nostrPollCreated':
                     mpToast('Poll published', 'success', 2600);
                     document.getElementById('poll-create-form').style.display = 'none';
@@ -1142,16 +1176,28 @@
         if (!grid.dataset.actionsBound) {
             grid.addEventListener('click', function (e) {
                 var btn = e.target.closest('[data-action]');
-                if (!btn) return;
-                var action = btn.dataset.action;
-                var slot = parseInt(btn.dataset.slot);
-                if (action === 'unplug') {
-                    _unpluggingSlots[slot] = { startTime: Date.now() };
-                    if (_lastSlotsData) renderSlots(_lastSlotsData);
-                    callTool('unplug_slot', { slot: slot });
+                if (btn) {
+                    e.stopPropagation();
+                    var action = btn.dataset.action;
+                    var slot = parseInt(btn.dataset.slot);
+                    if (action === 'unplug') {
+                        _unpluggingSlots[slot] = { startTime: Date.now() };
+                        if (_lastSlotsData) renderSlots(_lastSlotsData);
+                        callTool('unplug_slot', { slot: slot });
+                    }
+                    else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
+                    else if (action === 'clone') callTool('clone_slot', { slot: slot });
+                    return;
                 }
-                else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
-                else if (action === 'clone') callTool('clone_slot', { slot: slot });
+                // Click on slot card itself (not a button) → drill-in
+                var card = e.target.closest('.slot-card.occupied');
+                if (card) {
+                    var slotNum = card.querySelector('.slot-num');
+                    if (slotNum) {
+                        var idx = parseInt(slotNum.textContent) - 1;
+                        if (idx >= 0) openSlotDrill(idx);
+                    }
+                }
             });
             grid.dataset.actionsBound = '1';
         }
@@ -1209,6 +1255,417 @@
         if (_plugTimer) { clearInterval(_plugTimer); _plugTimer = null; }
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // SLOT DRILL-IN — Operations Console for Plugged Models
+    // ══════════════════════════════════════════════════════════════
+
+    function _detectProvider(slot) {
+        var src = String(slot.model_source || slot.model_id || slot.name || '').toLowerCase();
+        if (src.indexOf('anthropic') >= 0 || src.indexOf('claude') >= 0) return 'anthropic';
+        if (src.indexOf('openai') >= 0 || src.indexOf('gpt') >= 0 || src.indexOf('chatgpt') >= 0) return 'openai';
+        if (src.indexOf('google') >= 0 || src.indexOf('gemini') >= 0) return 'google';
+        if (src.indexOf('http://') >= 0 || src.indexOf('https://') >= 0) return 'remote';
+        if (src.indexOf('/') >= 0) return 'huggingface';
+        return 'local';
+    }
+
+    function _providerLabel(provider) {
+        var map = { anthropic: 'ANTHROPIC', openai: 'OPENAI', google: 'GOOGLE', remote: 'REMOTE', huggingface: 'HUGGINGFACE', local: 'LOCAL' };
+        return map[provider] || 'LOCAL';
+    }
+
+    function openSlotDrill(slotIndex) {
+        _slotDrill.active = true;
+        _slotDrill.slotIndex = slotIndex;
+        _slotDrillActivity = [];
+        var gridView = document.getElementById('council-grid-view');
+        var drillView = document.getElementById('slot-drill-view');
+        if (gridView) gridView.style.display = 'none';
+        if (drillView) drillView.classList.add('active');
+        renderSlotDrillDetail();
+        _initSlotTerminal();
+        // Populate activity from global log
+        _populateSlotActivity(slotIndex);
+    }
+
+    function closeSlotDrill() {
+        _slotDrill.active = false;
+        _slotDrill.slotIndex = -1;
+        _disposeSlotTerminal();
+        var gridView = document.getElementById('council-grid-view');
+        var drillView = document.getElementById('slot-drill-view');
+        if (gridView) gridView.style.display = '';
+        if (drillView) drillView.classList.remove('active');
+    }
+
+    function _getSlotData(index) {
+        if (!_lastSlotsData) return null;
+        var slotsArr = [];
+        try {
+            var d = _lastSlotsData;
+            if (d && d.content && Array.isArray(d.content) && d.content[0] && d.content[0].text) {
+                d = JSON.parse(d.content[0].text);
+            } else if (typeof d === 'string') {
+                d = JSON.parse(d);
+            }
+            slotsArr = d.slots || d || [];
+        } catch (e) { return null; }
+        return slotsArr[index] || null;
+    }
+
+    function renderSlotDrillDetail() {
+        var idx = _slotDrill.slotIndex;
+        var slot = _getSlotData(idx);
+        if (!slot) return;
+
+        var provider = _detectProvider(slot);
+        var modelLabel = slot.model_source || slot.model_id || slot.name || 'VACANT';
+        var modelType = slot.model_type || slot.type || 'unknown';
+
+        // Identity header
+        var modelEl = document.getElementById('slot-drill-model');
+        if (modelEl) modelEl.textContent = modelLabel;
+
+        var metaEl = document.getElementById('slot-drill-meta');
+        if (metaEl) {
+            metaEl.innerHTML =
+                '<span>SLOT ' + (idx + 1) + '</span>' +
+                '<span>' + escHtml(modelType).toUpperCase() + '</span>' +
+                '<span>' + escHtml(String(slot.status || 'ready')).toUpperCase() + '</span>';
+        }
+
+        var badgesEl = document.getElementById('slot-drill-badges');
+        if (badgesEl) {
+            badgesEl.innerHTML = '<span class="slot-drill-badge ' + provider + '">' + _providerLabel(provider) + '</span>';
+        }
+
+        // Metrics — request from evaluator
+        _renderSlotMetrics(idx);
+
+        // Action buttons
+        var actionsEl = document.getElementById('slot-drill-actions');
+        if (actionsEl) {
+            actionsEl.innerHTML =
+                '<button onclick="callTool(\'invoke_slot\',{slot:' + idx + ',text:\'test\'})">INVOKE</button>' +
+                '<button onclick="_slotDrillCompare(' + idx + ')">COMPARE</button>' +
+                '<button onclick="_slotDrillBenchmark(' + idx + ')">BENCHMARK</button>' +
+                '<button onclick="callTool(\'slot_info\',{slot:' + idx + '})">INFO</button>' +
+                '<button class="btn-dim" onclick="_slotDrillUnplug(' + idx + ')">UNPLUG</button>';
+        }
+    }
+
+    function _renderSlotMetrics(slotIndex) {
+        var metricsEl = document.getElementById('slot-drill-metrics');
+        if (!metricsEl) return;
+        // Request evaluation data from extension-side evaluator
+        vscode.postMessage({ command: 'requestSlotMetrics', slotIndex: slotIndex });
+        // Render placeholder metrics — will be updated when eval data arrives
+        var slot = _getSlotData(slotIndex);
+        var hubKey = slot ? (slot.model_source || slot.model_id) : null;
+        var hubMeta = hubKey ? _slotHubInfoCache[hubKey] : null;
+
+        metricsEl.innerHTML =
+            _metricCard('TOTAL CALLS', '—', '') +
+            _metricCard('SUCCESS RATE', '—', '') +
+            _metricCard('AVG LATENCY', '—', '') +
+            _metricCard('P95 LATENCY', '—', '') +
+            _metricCard('THROUGHPUT', '—', '') +
+            _metricCard('CONSISTENCY', '—', '') +
+            _metricCard('ERROR RATE', '—', '') +
+            _metricCard('LAST ACTIVE', '—', '');
+
+        // If we have hub metadata, show it
+        if (hubMeta) {
+            var extra = '';
+            if (hubMeta.author) extra += _metricCard('AUTHOR', escHtml(hubMeta.author), '');
+            if (hubMeta.downloads) extra += _metricCard('DOWNLOADS', _formatCount(hubMeta.downloads), '');
+            if (hubMeta.likes) extra += _metricCard('LIKES', _formatCount(hubMeta.likes), '');
+            if (hubMeta.size_mb && hubMeta.size_mb > 0) extra += _metricCard('SIZE', hubMeta.size_mb.toFixed(0) + ' MB', '');
+            if (extra) metricsEl.innerHTML += extra;
+        }
+    }
+
+    function _metricCard(label, value, cls) {
+        return '<div class="slot-metric-card"><div class="slot-metric-label">' + label +
+            '</div><div class="slot-metric-value ' + cls + '">' + value + '</div></div>';
+    }
+
+    function _updateSlotMetricsFromEval(evalData) {
+        var metricsEl = document.getElementById('slot-drill-metrics');
+        if (!metricsEl || !evalData) return;
+        var m = evalData;
+        var successCls = m.successRate >= 0.95 ? '' : (m.successRate >= 0.8 ? 'warn' : 'bad');
+        var errorCls = m.errorRate <= 0.05 ? '' : (m.errorRate <= 0.2 ? 'warn' : 'bad');
+        var latCls = m.avgLatencyMs <= 500 ? '' : (m.avgLatencyMs <= 2000 ? 'warn' : 'bad');
+        var lastActive = m.lastActive ? new Date(m.lastActive).toLocaleTimeString() : '—';
+
+        metricsEl.innerHTML =
+            _metricCard('TOTAL CALLS', String(m.totalCalls || 0), '') +
+            _metricCard('SUCCESS RATE', ((m.successRate || 0) * 100).toFixed(1) + '%', successCls) +
+            _metricCard('AVG LATENCY', (m.avgLatencyMs || 0).toFixed(0) + 'ms', latCls) +
+            _metricCard('P95 LATENCY', (m.p95LatencyMs || 0).toFixed(0) + 'ms', '') +
+            _metricCard('THROUGHPUT', (m.throughput || 0).toFixed(1) + '/min', '') +
+            _metricCard('CONSISTENCY', ((m.consistencyScore || 0) * 100).toFixed(0) + '%', '') +
+            _metricCard('ERROR RATE', ((m.errorRate || 0) * 100).toFixed(1) + '%', errorCls) +
+            _metricCard('LAST ACTIVE', lastActive, '');
+    }
+
+    function _populateSlotActivity(slotIndex) {
+        _slotDrillActivity = [];
+        var slotTools = ['invoke_slot', 'generate', 'classify', 'rerank', 'embed_text',
+            'forward', 'infer', 'deliberate', 'imagine', 'compare', 'debate', 'chain', 'all_slots'];
+        for (var i = 0; i < _activityLog.length; i++) {
+            var e = _activityLog[i];
+            if (!e) continue;
+            // Match events that target this specific slot
+            var targetSlot = e.args && (e.args.slot !== undefined ? e.args.slot : -1);
+            var isSlotSpecific = targetSlot === slotIndex;
+            var isBroadcast = slotTools.indexOf(e.tool) >= 0 && targetSlot === -1;
+            if (isSlotSpecific || isBroadcast) {
+                _slotDrillActivity.push(e);
+            }
+        }
+        _renderSlotActivityFeed();
+    }
+
+    function _renderSlotActivityFeed() {
+        var listEl = document.getElementById('slot-drill-activity-list');
+        var countEl = document.getElementById('slot-drill-activity-count');
+        if (!listEl) return;
+        if (countEl) countEl.textContent = _slotDrillActivity.length + ' events';
+
+        if (_slotDrillActivity.length === 0) {
+            listEl.innerHTML = '<div class="slot-activity-item" style="color:var(--text-dim);">No activity recorded for this slot yet.</div>';
+            return;
+        }
+
+        var html = '';
+        var items = _slotDrillActivity.slice(-30).reverse();
+        for (var i = 0; i < items.length; i++) {
+            var e = items[i];
+            var ts = new Date(e.timestamp).toLocaleTimeString();
+            var source = e.source || 'mcp';
+            var srcCls = source === 'terminal' ? 'terminal' : (source === 'workflow' ? 'workflow' : 'mcp');
+            var preview = '';
+            if (e.args) {
+                preview = e.args.text || e.args.prompt || e.args.input_text || '';
+                if (preview.length > 60) preview = preview.substring(0, 60) + '...';
+            }
+            var latency = e.durationMs >= 0 ? (e.durationMs + 'ms') : '';
+            var statusCls = e.error ? 'fail' : 'ok';
+            var statusText = e.error ? '✗' : '✓';
+
+            html += '<div class="slot-activity-item">' +
+                '<span class="slot-activity-source ' + srcCls + '">' + escHtml(source) + '</span>' +
+                '<span class="slot-activity-tool">' + escHtml(e.tool || '') + '</span>' +
+                '<span class="slot-activity-preview">' + escHtml(preview) + '</span>' +
+                '<span class="slot-activity-latency">' + latency + '</span>' +
+                '<span class="slot-activity-status ' + statusCls + '">' + statusText + '</span>' +
+                '<span style="color:var(--text-dim);font-size:9px;">' + ts + '</span>' +
+                '</div>';
+        }
+        listEl.innerHTML = html;
+    }
+
+    function _echoToSlotTerminal(event) {
+        if (!_slotDrill.active || !_slotDrill.term) return;
+        var idx = _slotDrill.slotIndex;
+        var targetSlot = event.args && (event.args.slot !== undefined ? event.args.slot : -1);
+        if (targetSlot !== idx && targetSlot !== -1) return;
+
+        var ts = new Date(event.timestamp).toLocaleTimeString();
+        var source = event.source || 'mcp';
+        var status = event.error ? '\x1b[31m✗ FAIL\x1b[0m' : '\x1b[32m✓ OK\x1b[0m';
+        var latency = event.durationMs >= 0 ? (event.durationMs + 'ms') : '';
+
+        _slotDrill.term.writeln('');
+        _slotDrill.term.writeln('\x1b[90m── ' + source.toUpperCase() + ' ── \x1b[36m' + (event.tool || '') + '\x1b[90m │ ' + ts + ' │ ' + latency + ' │ ' + status + '\x1b[0m');
+
+        if (event.args && (event.args.text || event.args.prompt || event.args.input_text)) {
+            var input = event.args.text || event.args.prompt || event.args.input_text || '';
+            if (input.length > 200) input = input.substring(0, 200) + '...';
+            _slotDrill.term.writeln('\x1b[90minput: \x1b[0m' + input);
+        }
+
+        // Show output preview if available
+        var result = event.result;
+        if (result) {
+            var output = '';
+            if (typeof result === 'string') output = result;
+            else if (result.content && Array.isArray(result.content) && result.content[0]) {
+                output = result.content[0].text || '';
+            }
+            if (output.length > 300) output = output.substring(0, 300) + '...';
+            if (output) {
+                _slotDrill.term.writeln('\x1b[90m' + '─'.repeat(50) + '\x1b[0m');
+                var lines = output.split('\n');
+                for (var li = 0; li < Math.min(lines.length, 10); li++) {
+                    _slotDrill.term.writeln(lines[li]);
+                }
+                if (lines.length > 10) _slotDrill.term.writeln('\x1b[90m... (' + (lines.length - 10) + ' more lines)\x1b[0m');
+                _slotDrill.term.writeln('\x1b[90m' + '─'.repeat(50) + '\x1b[0m');
+            }
+        }
+    }
+
+    function _initSlotTerminal() {
+        var container = document.getElementById('slot-drill-terminal');
+        if (!container) return;
+        if (_slotDrill.term) { _disposeSlotTerminal(); }
+
+        if (typeof Terminal === 'undefined' && typeof window.Terminal === 'undefined') {
+            container.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:10px;">xterm.js not loaded. Terminal unavailable.</div>';
+            return;
+        }
+
+        var TermClass = typeof Terminal !== 'undefined' ? Terminal : window.Terminal;
+        _slotDrill.term = new TermClass({
+            theme: {
+                background: '#0a0a1a',
+                foreground: '#e0e0e0',
+                cursor: '#00ff88',
+                cursorAccent: '#0a0a1a',
+                selectionBackground: '#00ff8833',
+                black: '#0a0a1a',
+                red: '#ff4444',
+                green: '#00ff88',
+                yellow: '#ffaa00',
+                blue: '#4488ff',
+                magenta: '#cc88ff',
+                cyan: '#00cccc',
+                white: '#e0e0e0'
+            },
+            fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
+            fontSize: 12,
+            cursorBlink: true,
+            scrollback: 5000,
+            convertEol: true
+        });
+
+        _slotDrill.term.open(container);
+
+        // Fit addon
+        if (typeof FitAddon !== 'undefined' || (window.FitAddon && window.FitAddon.FitAddon)) {
+            var FitClass = typeof FitAddon !== 'undefined' ? FitAddon : window.FitAddon.FitAddon;
+            _slotDrill.termFit = new FitClass();
+            _slotDrill.term.loadAddon(_slotDrill.termFit);
+            try { _slotDrill.termFit.fit(); } catch (e) { /* ignore */ }
+        }
+
+        // Web links addon
+        if (typeof WebLinksAddon !== 'undefined' || (window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon)) {
+            var WLClass = typeof WebLinksAddon !== 'undefined' ? WebLinksAddon : window.WebLinksAddon.WebLinksAddon;
+            _slotDrill.term.loadAddon(new WLClass());
+        }
+
+        var slot = _getSlotData(_slotDrill.slotIndex);
+        var modelLabel = slot ? (slot.model_source || slot.model_id || slot.name || 'unknown') : 'unknown';
+        var provider = slot ? _detectProvider(slot) : 'local';
+
+        _slotDrill.term.writeln('\x1b[36m╔══════════════════════════════════════════════════╗\x1b[0m');
+        _slotDrill.term.writeln('\x1b[36m║\x1b[0m  SLOT ' + (_slotDrill.slotIndex + 1) + ' — ' + modelLabel.substring(0, 38));
+        _slotDrill.term.writeln('\x1b[36m║\x1b[0m  Provider: ' + _providerLabel(provider) + '  │  Type: ' + (slot ? (slot.model_type || 'auto') : '?'));
+        _slotDrill.term.writeln('\x1b[36m╚══════════════════════════════════════════════════╝\x1b[0m');
+        _slotDrill.term.writeln('');
+        _slotDrill.term.writeln('\x1b[90mMCP invocations, workflow executions, and terminal');
+        _slotDrill.term.writeln('interactions for this slot appear here in real-time.\x1b[0m');
+        _slotDrill.term.writeln('');
+
+        // Request terminal spawn from extension
+        vscode.postMessage({ command: 'spawnSlotTerminal', slotIndex: _slotDrill.slotIndex });
+
+        // Pipe keystrokes to extension for forwarding to Pi process
+        _slotDrill.term.onData(function (data) {
+            vscode.postMessage({ command: 'slotTerminalInput', slotIndex: _slotDrill.slotIndex, data: data });
+        });
+
+        // Update status
+        var statusEl = document.getElementById('slot-drill-terminal-status');
+        if (statusEl) statusEl.textContent = 'initializing...';
+    }
+
+    function _disposeSlotTerminal() {
+        if (_slotDrill.term) {
+            _slotDrill.term.dispose();
+            _slotDrill.term = null;
+            _slotDrill.termFit = null;
+        }
+        // Tell extension to kill the Pi process
+        if (_slotDrill.slotIndex >= 0) {
+            vscode.postMessage({ command: 'killSlotTerminal', slotIndex: _slotDrill.slotIndex });
+        }
+    }
+
+    function _slotDrillCompare(slotIndex) {
+        // Find another plugged slot to compare against
+        var slotsArr = [];
+        try {
+            var d = _lastSlotsData;
+            if (d && d.content && Array.isArray(d.content) && d.content[0] && d.content[0].text) d = JSON.parse(d.content[0].text);
+            else if (typeof d === 'string') d = JSON.parse(d);
+            slotsArr = d.slots || d || [];
+        } catch (e) { return; }
+        var others = [];
+        for (var i = 0; i < slotsArr.length; i++) {
+            if (i !== slotIndex && _getSlotVisualState(slotsArr[i] || {}) === 'plugged') others.push(i);
+        }
+        if (others.length === 0) { mpToast('No other plugged slots to compare against', 'info', 2500); return; }
+        callTool('compare', { input_text: 'Explain the concept of emergence in complex systems.', slots: [slotIndex, others[0]] });
+    }
+
+    function _slotDrillBenchmark(slotIndex) {
+        var prompts = [
+            'What is 2+2?',
+            'Explain quantum entanglement in one sentence.',
+            'Write a Python function to reverse a string.'
+        ];
+        for (var i = 0; i < prompts.length; i++) {
+            callTool('invoke_slot', { slot: slotIndex, text: prompts[i] });
+        }
+        mpToast('Benchmark: ' + prompts.length + ' prompts sent to slot ' + (slotIndex + 1), 'info', 2500);
+    }
+
+    function _slotDrillUnplug(slotIndex) {
+        _unpluggingSlots[slotIndex] = { startTime: Date.now() };
+        callTool('unplug_slot', { slot: slotIndex });
+        closeSlotDrill();
+        mpToast('Unplugging slot ' + (slotIndex + 1) + '...', 'info', 2500);
+    }
+
+    // ── PLUG PROVIDER MODAL ──
+    function openPlugProviderModal() {
+        var modal = document.getElementById('plug-provider-modal');
+        if (modal) modal.classList.add('active');
+    }
+    // Expose to global scope for onclick
+    window.openPlugProviderModal = openPlugProviderModal;
+
+    function doPlugProvider() {
+        var url = (document.getElementById('plug-provider-url') || {}).value || '';
+        var key = (document.getElementById('plug-provider-key') || {}).value || '';
+        var model = (document.getElementById('plug-provider-model') || {}).value || '';
+        var slotName = (document.getElementById('plug-provider-slot-name') || {}).value || '';
+        if (!url) { mpToast('Provider URL is required', 'error', 2500); return; }
+
+        // Build the URL with query params for RemoteProviderProxy
+        var fullUrl = url;
+        var params = [];
+        if (model) params.push('model=' + encodeURIComponent(model));
+        if (key) params.push('key=' + encodeURIComponent(key));
+        if (params.length > 0) fullUrl += (fullUrl.indexOf('?') >= 0 ? '&' : '?') + params.join('&');
+
+        var args = { model_id: fullUrl };
+        if (slotName) args.slot_name = slotName;
+
+        callTool('plug_model', args);
+        closeModals();
+        mpToast('Plugging remote provider...', 'info', 2500);
+    }
+    window.doPlugProvider = doPlugProvider;
+    window._slotDrillCompare = _slotDrillCompare;
+    window._slotDrillBenchmark = _slotDrillBenchmark;
+    window._slotDrillUnplug = _slotDrillUnplug;
+
     // ── ACTIVITY FEED ──
     var PLUG_TOOLS = ['plug_model', 'hub_plug'];
     function addActivityEntry(event) {
@@ -1249,6 +1706,15 @@
         if (_activityLog.length > 500) _activityLog = _activityLog.slice(-500);
         if (event.tool === 'workflow_execute' || event.tool === 'workflow_status') {
             handleWorkflowActivity(event);
+        }
+        // Echo to slot drill-in terminal and activity feed if open
+        if (_slotDrill.active) {
+            _echoToSlotTerminal(event);
+            var targetSlot = event.args && (event.args.slot !== undefined ? event.args.slot : -1);
+            if (targetSlot === _slotDrill.slotIndex || targetSlot === -1) {
+                _slotDrillActivity.push(event);
+                _renderSlotActivityFeed();
+            }
         }
         // Append new entry to DOM without destroying expanded entries
         var feed = document.getElementById('activity-feed');
@@ -6788,6 +7254,10 @@
     renderWorkflowNodeStates(null, null);
     _wfRenderDrillDetail();
     _wfSetBadge('idle', 'IDLE');
+
+    // ── SLOT DRILL-IN BACK BUTTON ──
+    var drillBackBtn = document.getElementById('slot-drill-back');
+    if (drillBackBtn) drillBackBtn.addEventListener('click', function () { closeSlotDrill(); });
 
     // Tell extension we're ready
     vscode.postMessage({ command: 'ready' });
