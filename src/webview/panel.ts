@@ -40,7 +40,7 @@ export class CouncilPanel {
 
     private repChains: Map<string, ReputationChain> = new Map();
 
-    private slotTerminals: Map<number, import('child_process').ChildProcess> = new Map();
+    private slotTerminals: Map<number, vscode.Terminal> = new Map();
 
     constructor(
         private extensionUri: vscode.Uri,
@@ -144,10 +144,6 @@ export class CouncilPanel {
         const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js');
         const svgPanZoomPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'svg-pan-zoom.min.js');
         const peerjsPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'peerjs.min.js');
-        const xtermPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'xterm.js');
-        const xtermFitPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'xterm-addon-fit.js');
-        const xtermWebLinksPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'xterm-addon-web-links.js');
-
         this.panel = vscode.window.createWebviewPanel(
             'championCouncil', 'Champion Council', vscode.ViewColumn.One,
             {
@@ -161,10 +157,7 @@ export class CouncilPanel {
         const scriptUri = this.panel.webview.asWebviewUri(mediaPath);
         const svgPanZoomUri = this.panel.webview.asWebviewUri(svgPanZoomPath);
         const peerjsUri = this.panel.webview.asWebviewUri(peerjsPath);
-        const xtermUri = this.panel.webview.asWebviewUri(xtermPath);
-        const xtermFitUri = this.panel.webview.asWebviewUri(xtermFitPath);
-        const xtermWebLinksUri = this.panel.webview.asWebviewUri(xtermWebLinksPath);
-        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource, xtermUri, xtermFitUri, xtermWebLinksUri);
+        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource);
 
         this.panel.webview.onDidReceiveMessage(
             (msg) => {
@@ -1464,23 +1457,16 @@ export class CouncilPanel {
                 break;
             }
 
-            // ── Slot Drill-In Terminal ───────────────────────────────
+            // ── Slot Drill-In Terminal (Native VS Code Terminal) ─────
             case 'spawnSlotTerminal': {
                 const slotIdx = msg.slotIndex as number;
                 this.spawnSlotTerminal(slotIdx);
                 break;
             }
-            case 'slotTerminalInput': {
-                const proc = this.slotTerminals?.get(msg.slotIndex);
-                if (proc && proc.stdin && !proc.killed) {
-                    proc.stdin.write(msg.data);
-                }
-                break;
-            }
             case 'killSlotTerminal': {
-                const proc2 = this.slotTerminals?.get(msg.slotIndex);
-                if (proc2 && !proc2.killed) {
-                    proc2.kill();
+                const term = this.slotTerminals?.get(msg.slotIndex);
+                if (term) {
+                    term.dispose();
                 }
                 this.slotTerminals?.delete(msg.slotIndex);
                 break;
@@ -1710,9 +1696,9 @@ export class CouncilPanel {
     }
 
     private async spawnSlotTerminal(slotIndex: number) {
-        // Kill existing terminal for this slot
+        // Dispose existing terminal for this slot
         const existing = this.slotTerminals.get(slotIndex);
-        if (existing && !existing.killed) { existing.kill(); }
+        if (existing) { existing.dispose(); }
 
         const cp = require('child_process') as typeof import('child_process');
         const os = require('os') as typeof import('os');
@@ -1726,125 +1712,89 @@ export class CouncilPanel {
         } catch { /* slot_info may fail if capsule isn't running */ }
 
         const modelSource = slotInfo?.model_source || slotInfo?.model_id || slotInfo?.name || '';
+        const slotLabel = slotInfo?.name || modelSource || `slot-${slotIndex}`;
         const isRemoteUrl = modelSource.startsWith('http://') || modelSource.startsWith('https://');
 
+        // Ensure the OpenAI-compatible API bridge is running on port 8420
+        try {
+            await this.callToolParsed('start_api_server', { port: 8420 }, { suppressActivity: true, source: 'internal' });
+        } catch { /* may already be running or capsule not ready */ }
+
         // Detect Pi CLI availability
-        let piCmd = '';
+        let hasPi = false;
+        let useNpx = false;
         try {
             cp.execSync(isWin ? 'where pi' : 'which pi', { stdio: 'ignore' });
-            piCmd = 'pi';
+            hasPi = true;
         } catch {
             try {
                 cp.execSync('npx --yes @mariozechner/pi-coding-agent --version', { stdio: 'ignore', timeout: 15000 });
-                piCmd = 'npx @mariozechner/pi-coding-agent';
+                hasPi = true;
+                useNpx = true;
             } catch { /* Pi not available */ }
         }
 
-        let proc: import('child_process').ChildProcess;
+        // Build the shell command and environment for the native terminal
+        const env: Record<string, string> = { TERM: 'xterm-256color' };
+        let shellCommand: string;
 
-        if (piCmd) {
+        if (hasPi) {
             // Generate per-slot Pi config in a temp directory
             const tmpDir = path.join(os.tmpdir(), `champion-pi-slot-${slotIndex}`);
             try { fs.mkdirSync(tmpDir, { recursive: true }); } catch { /* exists */ }
 
-            // Determine the API base URL and model name
-            const apiPort = vscode.workspace.getConfiguration('champion').get<number>('mcpPort', 8765);
+            // ALL slots route through the capsule API bridge — local AND remote providers.
+            // Remote providers are plugged as slots via RemoteProviderProxy, so invoke_slot
+            // handles them identically. This ensures Dreamer rewards, evaluator metrics,
+            // CASCADE logging, and MCP tool control all work for every slot.
             const apiBase = `http://localhost:8420/v1`;
-
-            // Build models.json for this slot
             const modelsConfig: any = { providers: {} };
+            const modelId = `slot-${slotIndex}`;
+            const providerName = `capsule-slot-${slotIndex}`;
 
-            if (isRemoteUrl) {
-                // Remote provider — parse URL for base, model, key
-                const url = new URL(modelSource.split('?')[0]);
-                const params = new URLSearchParams(modelSource.includes('?') ? modelSource.split('?')[1] : '');
-                const remoteModel = params.get('model') || 'default';
-                const remoteKey = params.get('key') || 'none';
-                const providerName = `slot-${slotIndex}-remote`;
+            modelsConfig.providers[providerName] = {
+                baseUrl: apiBase,
+                api: 'openai-completions',
+                apiKey: 'local',
+                models: [{ id: modelId, name: slotLabel }]
+            };
 
-                modelsConfig.providers[providerName] = {
-                    baseUrl: url.origin + url.pathname,
-                    api: 'openai-completions',
-                    apiKey: remoteKey,
-                    models: [{ id: remoteModel, name: modelSource.substring(0, 60) }]
-                };
+            fs.writeFileSync(path.join(tmpDir, 'models.json'), JSON.stringify(modelsConfig, null, 2));
+            env['PI_CONFIG_DIR'] = tmpDir;
 
-                // Write config
-                fs.writeFileSync(path.join(tmpDir, 'models.json'), JSON.stringify(modelsConfig, null, 2));
-
-                // Launch Pi with the remote provider
-                const piArgs = piCmd === 'pi' ? [] : ['@mariozechner/pi-coding-agent'];
-                proc = cp.spawn(piCmd === 'pi' ? 'pi' : 'npx', [
-                    ...piArgs,
-                    '--provider', providerName,
-                    '--model', remoteModel
-                ], {
-                    env: { ...process.env, TERM: 'xterm-256color', PI_CONFIG_DIR: tmpDir },
-                    cwd,
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: true
-                });
-            } else {
-                // Local model via capsule API bridge
-                const slotModel = modelSource || `slot-${slotIndex}`;
-                const providerName = `capsule-slot-${slotIndex}`;
-
-                modelsConfig.providers[providerName] = {
-                    baseUrl: apiBase,
-                    api: 'openai-completions',
-                    apiKey: 'local',
-                    models: [{ id: `slot-${slotIndex}`, name: slotModel }]
-                };
-
-                fs.writeFileSync(path.join(tmpDir, 'models.json'), JSON.stringify(modelsConfig, null, 2));
-
-                const piArgs = piCmd === 'pi' ? [] : ['@mariozechner/pi-coding-agent'];
-                proc = cp.spawn(piCmd === 'pi' ? 'pi' : 'npx', [
-                    ...piArgs,
-                    '--provider', providerName,
-                    '--model', `slot-${slotIndex}`
-                ], {
-                    env: { ...process.env, TERM: 'xterm-256color', PI_CONFIG_DIR: tmpDir },
-                    cwd,
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: true
-                });
-            }
+            const piExe = useNpx ? 'npx @mariozechner/pi-coding-agent' : 'pi';
+            shellCommand = `${piExe} --provider ${providerName} --model ${modelId}`;
         } else {
-            // Fallback: bare shell with helpful message
-            const shell = isWin ? 'cmd.exe' : (process.env.SHELL || '/bin/bash');
-            const shellArgs = isWin ? [] : ['-i'];
-
-            proc = cp.spawn(shell, shellArgs, {
-                env: { ...process.env, TERM: 'xterm-256color' },
-                cwd,
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
-
-            // Send a hint about installing Pi
-            this.send({
-                type: 'slotTerminalOutput', slotIndex,
-                data: '\x1b[33mPi CLI not found. Install for interactive model access:\x1b[0m\r\n' +
-                    '  npm install -g @mariozechner/pi-coding-agent\r\n\r\n' +
-                    '\x1b[90mFalling back to shell. You can run Pi manually:\x1b[0m\r\n' +
-                    `  pi --provider openai-compatible --baseUrl http://localhost:8420/v1 --model slot-${slotIndex}\r\n\r\n`
-            });
+            // No Pi CLI — open a shell with instructions
+            shellCommand = isWin
+                ? `echo Pi CLI not found. Install: npm install -g @mariozechner/pi-coding-agent && echo. && echo Manual launch: pi --provider openai-compatible --baseUrl http://localhost:8420/v1 --model slot-${slotIndex} && cmd /k`
+                : `echo "Pi CLI not found. Install: npm install -g @mariozechner/pi-coding-agent" && echo "" && echo "Manual launch: pi --provider openai-compatible --baseUrl http://localhost:8420/v1 --model slot-${slotIndex}" && exec $SHELL`;
         }
 
-        this.slotTerminals.set(slotIndex, proc);
-
-        proc.stdout?.on('data', (data: Buffer) => {
-            this.send({ type: 'slotTerminalOutput', slotIndex, data: data.toString() });
+        // Create a REAL VS Code terminal — native, interactive, drillable
+        const terminal = vscode.window.createTerminal({
+            name: `Pi: ${slotLabel} [slot ${slotIndex}]`,
+            cwd,
+            env,
+            iconPath: new vscode.ThemeIcon('hubot'),
+            message: `── Champion Council ── Slot ${slotIndex}: ${slotLabel} ──`
         });
 
-        proc.stderr?.on('data', (data: Buffer) => {
-            this.send({ type: 'slotTerminalOutput', slotIndex, data: data.toString() });
-        });
+        // Show the terminal and send the command
+        terminal.show(false); // false = don't steal focus from current editor
+        terminal.sendText(shellCommand);
 
-        proc.on('exit', (code: number | null) => {
-            this.send({ type: 'slotTerminalExited', slotIndex, code: code || 0 });
-            this.slotTerminals.delete(slotIndex);
+        this.slotTerminals.set(slotIndex, terminal);
+
+        // Track terminal disposal
+        const disposeListener = vscode.window.onDidCloseTerminal(t => {
+            if (t === terminal) {
+                this.slotTerminals.delete(slotIndex);
+                this.send({ type: 'slotTerminalExited', slotIndex, code: 0 });
+                disposeListener.dispose();
+            }
         });
+        this.disposables.push(disposeListener);
 
         this.send({ type: 'slotTerminalReady', slotIndex });
     }
@@ -2799,15 +2749,8 @@ export class CouncilPanel {
     // HTML Generation - Operations Facility UI
     // ═══════════════════════════════════════════════════════════════
 
-    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string, xtermUri?: vscode.Uri, xtermFitUri?: vscode.Uri, xtermWebLinksUri?: vscode.Uri): string {
+    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string): string {
         const toolRegistryJSON = JSON.stringify(TOOL_CATEGORIES);
-
-        // Read xterm.css for inline injection
-        let xtermCSS = '';
-        try {
-            const xtermCssPath = path.join(this.extensionUri.fsPath, 'media', 'xterm.css');
-            xtermCSS = fs.readFileSync(xtermCssPath, 'utf-8');
-        } catch { /* xterm CSS not available — terminal will still work with basic styling */ }
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -4934,8 +4877,6 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 .dvm-job-card { border: 1px solid var(--border); padding: 10px; margin-bottom: 8px; background: var(--surface); }
 .dvm-result { margin-top: 8px; padding: 8px; background: var(--surface2); border: 1px solid var(--border); font-size: 10px; white-space: pre-wrap; }
 
-/* ── XTERM.JS TERMINAL ── */
-${xtermCSS}
 </style>
 </head>
 <body>
@@ -6354,9 +6295,6 @@ ${xtermCSS}
 <script>window.__CATEGORIES__ = ${toolRegistryJSON};</script>
 <script src="${svgPanZoomUri}"></script>
 ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
-${xtermUri ? `<script src="${xtermUri}"></script>` : ''}
-${xtermFitUri ? `<script src="${xtermFitUri}"></script>` : ''}
-${xtermWebLinksUri ? `<script src="${xtermWebLinksUri}"></script>` : ''}
 <script src="${scriptUri}"></script>
 <script>
 (function(){

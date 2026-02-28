@@ -30,7 +30,7 @@
     let _wfColorIndex = 0;
 
     // ── SLOT DRILL-IN STATE ──
-    let _slotDrill = { active: false, slotIndex: -1, term: null, termFit: null };
+    let _slotDrill = { active: false, slotIndex: -1, termActive: false };
     let _slotDrillActivity = []; // per-slot activity entries
 
     // ── NIP-88: POLL STATE ──
@@ -710,29 +710,20 @@
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
                     break;
-                case 'slotTerminalOutput':
-                    if (_slotDrill.active && _slotDrill.term && msg.slotIndex === _slotDrill.slotIndex) {
-                        _slotDrill.term.write(msg.data);
-                    }
-                    break;
                 case 'slotTerminalReady':
                     if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex) {
                         var stEl = document.getElementById('slot-drill-terminal-status');
-                        if (stEl) stEl.textContent = 'connected';
-                        if (_slotDrill.term) {
-                            _slotDrill.term.writeln('\x1b[32m● Terminal connected\x1b[0m');
-                            _slotDrill.term.writeln('');
-                        }
+                        if (stEl) stEl.textContent = 'Native terminal open — check VS Code terminal panel';
+                        var btnR = document.getElementById('slot-drill-launch-terminal');
+                        if (btnR) { btnR.textContent = '● TERMINAL OPEN'; btnR.disabled = true; btnR.style.opacity = '0.5'; }
                     }
                     break;
                 case 'slotTerminalExited':
                     if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex) {
                         var stEl2 = document.getElementById('slot-drill-terminal-status');
-                        if (stEl2) stEl2.textContent = 'disconnected';
-                        if (_slotDrill.term) {
-                            _slotDrill.term.writeln('');
-                            _slotDrill.term.writeln('\x1b[31m● Terminal process exited (code: ' + (msg.code || 0) + ')\x1b[0m');
-                        }
+                        if (stEl2) stEl2.textContent = 'Terminal closed';
+                        var btnE = document.getElementById('slot-drill-launch-terminal');
+                        if (btnE) { btnE.textContent = '▶ OPEN Pi CLI TERMINAL'; btnE.disabled = false; btnE.style.opacity = '1'; }
                     }
                     break;
                 case 'slotEvalMetrics':
@@ -1468,129 +1459,48 @@
     }
 
     function _echoToSlotTerminal(event) {
-        if (!_slotDrill.active || !_slotDrill.term) return;
-        var idx = _slotDrill.slotIndex;
-        var targetSlot = event.args && (event.args.slot !== undefined ? event.args.slot : -1);
-        if (targetSlot !== idx && targetSlot !== -1) return;
-
-        var ts = new Date(event.timestamp).toLocaleTimeString();
-        var source = event.source || 'mcp';
-        var status = event.error ? '\x1b[31m✗ FAIL\x1b[0m' : '\x1b[32m✓ OK\x1b[0m';
-        var latency = event.durationMs >= 0 ? (event.durationMs + 'ms') : '';
-
-        _slotDrill.term.writeln('');
-        _slotDrill.term.writeln('\x1b[90m── ' + source.toUpperCase() + ' ── \x1b[36m' + (event.tool || '') + '\x1b[90m │ ' + ts + ' │ ' + latency + ' │ ' + status + '\x1b[0m');
-
-        if (event.args && (event.args.text || event.args.prompt || event.args.input_text)) {
-            var input = event.args.text || event.args.prompt || event.args.input_text || '';
-            if (input.length > 200) input = input.substring(0, 200) + '...';
-            _slotDrill.term.writeln('\x1b[90minput: \x1b[0m' + input);
-        }
-
-        // Show output preview if available
-        var result = event.result;
-        if (result) {
-            var output = '';
-            if (typeof result === 'string') output = result;
-            else if (result.content && Array.isArray(result.content) && result.content[0]) {
-                output = result.content[0].text || '';
-            }
-            if (output.length > 300) output = output.substring(0, 300) + '...';
-            if (output) {
-                _slotDrill.term.writeln('\x1b[90m' + '─'.repeat(50) + '\x1b[0m');
-                var lines = output.split('\n');
-                for (var li = 0; li < Math.min(lines.length, 10); li++) {
-                    _slotDrill.term.writeln(lines[li]);
-                }
-                if (lines.length > 10) _slotDrill.term.writeln('\x1b[90m... (' + (lines.length - 10) + ' more lines)\x1b[0m');
-                _slotDrill.term.writeln('\x1b[90m' + '─'.repeat(50) + '\x1b[0m');
-            }
-        }
+        // Activity echoing now goes through the activity list, not xterm
+        // This function is kept for compatibility — activity is tracked via _slotDrillActivity
+        if (!_slotDrill.active) return;
     }
 
     function _initSlotTerminal() {
         var container = document.getElementById('slot-drill-terminal');
         if (!container) return;
-        if (_slotDrill.term) { _disposeSlotTerminal(); }
-
-        if (typeof Terminal === 'undefined' && typeof window.Terminal === 'undefined') {
-            container.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:10px;">xterm.js not loaded. Terminal unavailable.</div>';
-            return;
-        }
-
-        var TermClass = typeof Terminal !== 'undefined' ? Terminal : window.Terminal;
-        _slotDrill.term = new TermClass({
-            theme: {
-                background: '#0a0a1a',
-                foreground: '#e0e0e0',
-                cursor: '#00ff88',
-                cursorAccent: '#0a0a1a',
-                selectionBackground: '#00ff8833',
-                black: '#0a0a1a',
-                red: '#ff4444',
-                green: '#00ff88',
-                yellow: '#ffaa00',
-                blue: '#4488ff',
-                magenta: '#cc88ff',
-                cyan: '#00cccc',
-                white: '#e0e0e0'
-            },
-            fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
-            fontSize: 12,
-            cursorBlink: true,
-            scrollback: 5000,
-            convertEol: true
-        });
-
-        _slotDrill.term.open(container);
-
-        // Fit addon
-        if (typeof FitAddon !== 'undefined' || (window.FitAddon && window.FitAddon.FitAddon)) {
-            var FitClass = typeof FitAddon !== 'undefined' ? FitAddon : window.FitAddon.FitAddon;
-            _slotDrill.termFit = new FitClass();
-            _slotDrill.term.loadAddon(_slotDrill.termFit);
-            try { _slotDrill.termFit.fit(); } catch (e) { /* ignore */ }
-        }
-
-        // Web links addon
-        if (typeof WebLinksAddon !== 'undefined' || (window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon)) {
-            var WLClass = typeof WebLinksAddon !== 'undefined' ? WebLinksAddon : window.WebLinksAddon.WebLinksAddon;
-            _slotDrill.term.loadAddon(new WLClass());
-        }
 
         var slot = _getSlotData(_slotDrill.slotIndex);
         var modelLabel = slot ? (slot.model_source || slot.model_id || slot.name || 'unknown') : 'unknown';
         var provider = slot ? _detectProvider(slot) : 'local';
 
-        _slotDrill.term.writeln('\x1b[36m╔══════════════════════════════════════════════════╗\x1b[0m');
-        _slotDrill.term.writeln('\x1b[36m║\x1b[0m  SLOT ' + (_slotDrill.slotIndex + 1) + ' — ' + modelLabel.substring(0, 38));
-        _slotDrill.term.writeln('\x1b[36m║\x1b[0m  Provider: ' + _providerLabel(provider) + '  │  Type: ' + (slot ? (slot.model_type || 'auto') : '?'));
-        _slotDrill.term.writeln('\x1b[36m╚══════════════════════════════════════════════════╝\x1b[0m');
-        _slotDrill.term.writeln('');
-        _slotDrill.term.writeln('\x1b[90mMCP invocations, workflow executions, and terminal');
-        _slotDrill.term.writeln('interactions for this slot appear here in real-time.\x1b[0m');
-        _slotDrill.term.writeln('');
+        // Replace the xterm container with a launch panel for native terminal
+        container.innerHTML =
+            '<div style="padding:16px;text-align:center;">' +
+                '<div style="color:var(--accent);font-size:11px;letter-spacing:2px;margin-bottom:8px;">SLOT ' + (_slotDrill.slotIndex + 1) + ' — ' + escHtml(modelLabel.substring(0, 50)) + '</div>' +
+                '<div style="color:var(--text-dim);font-size:10px;margin-bottom:12px;">' + _providerLabel(provider) + ' │ ' + (slot ? (slot.model_type || 'auto') : '?') + '</div>' +
+                '<button id="slot-drill-launch-terminal" onclick="_launchNativeTerminal()" style="' +
+                    'background:var(--accent);color:#000;border:none;padding:10px 24px;font-size:12px;font-weight:bold;' +
+                    'cursor:pointer;letter-spacing:1px;border-radius:2px;margin-bottom:8px;">' +
+                    '▶ OPEN Pi CLI TERMINAL</button>' +
+                '<div id="slot-drill-terminal-status" style="color:var(--text-dim);font-size:9px;margin-top:6px;">Click to open a native VS Code terminal for this slot</div>' +
+            '</div>';
 
-        // Request terminal spawn from extension
+        _slotDrill.termActive = false;
+    }
+
+    function _launchNativeTerminal() {
+        if (!_slotDrill.active || _slotDrill.slotIndex < 0) return;
+        // Ask the extension to spawn a real VS Code terminal
         vscode.postMessage({ command: 'spawnSlotTerminal', slotIndex: _slotDrill.slotIndex });
-
-        // Pipe keystrokes to extension for forwarding to Pi process
-        _slotDrill.term.onData(function (data) {
-            vscode.postMessage({ command: 'slotTerminalInput', slotIndex: _slotDrill.slotIndex, data: data });
-        });
-
-        // Update status
+        _slotDrill.termActive = true;
         var statusEl = document.getElementById('slot-drill-terminal-status');
-        if (statusEl) statusEl.textContent = 'initializing...';
+        if (statusEl) statusEl.textContent = 'Opening native terminal...';
+        var btn = document.getElementById('slot-drill-launch-terminal');
+        if (btn) { btn.textContent = '● TERMINAL OPEN'; btn.disabled = true; btn.style.opacity = '0.5'; }
     }
 
     function _disposeSlotTerminal() {
-        if (_slotDrill.term) {
-            _slotDrill.term.dispose();
-            _slotDrill.term = null;
-            _slotDrill.termFit = null;
-        }
-        // Tell extension to kill the Pi process
+        _slotDrill.termActive = false;
+        // Tell extension to kill the terminal
         if (_slotDrill.slotIndex >= 0) {
             vscode.postMessage({ command: 'killSlotTerminal', slotIndex: _slotDrill.slotIndex });
         }
