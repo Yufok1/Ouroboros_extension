@@ -2,6 +2,61 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.7] - 2026-03-01
+
+### Agentic Drill-Down, FelixBag Versioning & Web Search — 156 Tools
+
+Major frontend alignment release bringing the VS Code extension up to parity with the latest champion capsule backend capabilities (two compiler rounds of new systems).
+
+**Agent Chat Drill-Down (NEW)**
+- Slot cards now have a CHAT button on occupied slots, opening a full agent chat overlay panel inside the Council tab.
+- Interactive multi-turn conversations with any plugged model using the `agent_chat` MCP tool.
+- Real-time tool call trace display showing each tool the agent invoked and its result.
+- Session persistence within the current session with RESET button for fresh conversations.
+- Agents receive innate access to CASCADE, Diagnostics, FelixBag, and read-only workflow tools by default.
+- Blocked tool enforcement prevents agents from executing workflows or destructive operations unless pre-authorized.
+
+**FelixBag Document Versioning (8 new tools)**
+- `bag_read_doc`, `bag_list_docs`, `bag_search_docs`, `bag_tree` — sandboxed file operations within FelixBag memory.
+- `bag_checkpoint`, `bag_versions`, `bag_diff`, `bag_restore` — git-like versioning, checkpointing, and differential history for FelixBag content.
+- Activity feed auto-refreshes catalog on `bag_checkpoint` and `bag_restore` mutations.
+
+**Web Search Tool (NEW)**
+- First-class `web_search` MCP tool available to both direct callers and plugged agents.
+- Registered in the API & Server tool category.
+
+**Frontend Tool Registry Alignment**
+- Tool count updated across all surfaces: 146 → 156 tools across 21 categories.
+- `MEMORY_TOOLS` array updated with all 8 new bag document/versioning tools.
+- `COUNCIL_TOOLS` array updated with `agent_chat`.
+- `package.json` setting descriptions updated for FelixBag (20 tools), Chat (4 tools), and API & Server (7 tools) categories.
+- Removed legacy Pi CLI terminal slot drill-in system (replaced by agent chat overlay).
+
+**Capsule Refresh**
+- Recompiled `champion_gen8.py` with all new backend tools and redistributed as `capsule.gz`.
+
+## [0.9.6] - 2026-02-28
+
+### CPU-Safe Model Loading + Recompiled Champion
+
+- Fixed all 12 model loader functions (`_load_as_llm`, `_load_as_seq2seq`, `_load_as_image_classification`, `_load_as_vlm`, `_load_as_generic`, `_load_as_classifier` × 2 levels) to pass `torch_dtype=torch.float16` and `low_cpu_mem_usage=True` to `from_pretrained()`. Prevents Windows segfault (0xC0000005) when plugging models on CPU-only PyTorch.
+- Added ecosystem context block for agent nodes with session persistence via FelixBag.
+- Added OpenAI-compatible HTTP API bridge (`start_api_server`) on port 8420.
+- Added `RemoteProviderProxy` for inference provider slots with URL detection.
+- Added `${expr}` syntax support and comment escaping fix in workflow interpolation.
+- Fixed `granted_tools` default safe set and `partial_failure` workflow status.
+- Recompiled `champion_gen8.py` and redistributed `capsule.gz` to all 3 deployment targets.
+
+## [0.9.5] - 2026-02-28
+
+### Embedded Terminal + Frontend Parity
+
+- Wired xterm.js embedded terminal into VS Code extension webview with `child_process.spawn()`.
+- Added `pipeToolToSlotProcesses` for all 4 tool categories.
+- Added WebSocket terminal bridges at `/ws/terminal/{slot_index}` for both Python servers.
+- Synced all three frontends (VS Code, HF Space, self_deploy) for terminal implementation parity.
+- Added `accelerate`, `bitsandbytes`, `peft`, `safetensors` to requirements files.
+
 ## [0.9.4] - 2026-02-28
 
 ### Dynamic Host Capacity Guardrails

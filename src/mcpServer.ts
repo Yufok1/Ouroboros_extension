@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as zlib from 'zlib';
 import * as os from 'os';
 
-// Tool category → tool name mapping (146 tools across 21 categories)
+// Tool category → tool name mapping (156 tools across 21 categories)
 export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] }> = {
     'Core Inference': {
         setting: 'coreInference',
@@ -14,7 +14,7 @@ export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] 
     },
     'Chat & Conversation': {
         setting: 'chat',
-        tools: ['chat', 'chat_reset', 'chat_history']
+        tools: ['chat', 'chat_reset', 'chat_history', 'agent_chat']
     },
     'Batch Operations': {
         setting: 'batch',
@@ -30,7 +30,13 @@ export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] 
     },
     'FelixBag Memory': {
         setting: 'felixbag',
-        tools: ['bag_get', 'bag_put', 'bag_search', 'bag_catalog', 'bag_induct', 'bag_forget', 'bag_export', 'pocket', 'summon', 'materialize', 'load_bag', 'save_bag']
+        tools: [
+            'bag_get', 'bag_put', 'bag_search', 'bag_catalog',
+            'bag_induct', 'bag_forget', 'bag_export',
+            'pocket', 'summon', 'materialize', 'load_bag', 'save_bag',
+            'bag_read_doc', 'bag_list_docs', 'bag_search_docs', 'bag_tree',
+            'bag_checkpoint', 'bag_versions', 'bag_diff', 'bag_restore'
+        ]
     },
     'HuggingFace Hub': {
         setting: 'huggingface',
@@ -66,7 +72,7 @@ export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] 
     },
     'API & Server': {
         setting: 'apiServer',
-        tools: ['start_api_server', 'orchestra', 'relay_status', 'relay_send', 'spawn_tui', 'toggle_relay']
+        tools: ['start_api_server', 'orchestra', 'relay_status', 'relay_send', 'spawn_tui', 'toggle_relay', 'web_search']
     },
     'HOLD Protocol': {
         setting: 'hold',
@@ -786,6 +792,17 @@ export class MCPServerManager {
         const lines = text.split(/\r?\n/);
         this._mcpLogRemainder = lines.pop() || '';
 
+        // Tools the extension polls on timers — never surface from log tailer.
+        // The extension already has the data; re-emitting from the log just spams
+        // the activity feed with false "EXTERNAL" entries.
+        const LOG_TAILER_BLOCKLIST = new Set([
+            'get_status', 'list_slots', 'clear_cache',
+            'bag_catalog', 'load_bag', 'save_bag',
+            'start_rerun_viewer', 'rerun_log_inference', 'rerun_log_evolution',
+            'workflow_status', 'workflow_history',
+            'get_cached', 'slot_info', 'start_api_server'
+        ]);
+
         for (const line of lines) {
             if (!line.trim()) { continue; }
 
@@ -793,7 +810,7 @@ export class MCPServerManager {
             // These carry full args, result, metrics, duration. Prefer when available.
             const structured = this.parseStructuredLine(line);
             if (structured) {
-                if (this.isLikelyLocalEcho(structured.tool, structured.timestamp)) {
+                if (LOG_TAILER_BLOCKLIST.has(structured.tool) || this.isLikelyLocalEcho(structured.tool, structured.timestamp)) {
                     continue;
                 }
                 this.emitActivity({
@@ -814,22 +831,16 @@ export class MCPServerManager {
             }
 
             // ── 🔧 tool call lines ──
-            // Emit activity directly from these — they are the primary signal.
+            // Do NOT emit generic start/summary entries from these lines.
+            // They are noisy 0ms duplicates when a structured 📊 line exists.
+            // Keep only workflow extraction side-effects for external runs that
+            // may need follow-up fetches.
             const parsed = this.parseToolLine(line);
             if (!parsed) { continue; }
 
-            if (this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) {
+            if (LOG_TAILER_BLOCKLIST.has(parsed.tool) || this.isLikelyLocalEcho(parsed.tool, parsed.timestamp)) {
                 continue;
             }
-            this.emitActivity({
-                timestamp: parsed.timestamp,
-                tool: parsed.tool,
-                category: this.getCategoryForTool(parsed.tool),
-                args: parsed.argsSummary ? { summary: parsed.argsSummary } : {},
-                result: parsed.argsSummary ? `[external] ${parsed.argsSummary}` : '[external call]',
-                durationMs: 0,
-                source: 'external'
-            });
             if (parsed.tool === 'workflow_execute' || parsed.tool === 'workflow_status') {
                 this.fetchExternalWorkflowResult(parsed).catch(() => {});
             }
@@ -1755,7 +1766,7 @@ export class MCPServerManager {
         }
 
         // Emit a "started" event for long-running tools so UI can show progress
-        const LONG_RUNNING_TOOLS = ['plug_model', 'hub_plug', 'hub_download'];
+        const LONG_RUNNING_TOOLS = ['plug_model', 'hub_plug', 'hub_download', 'agent_chat'];
         if (!suppressActivity && LONG_RUNNING_TOOLS.includes(toolName)) {
             this.emitActivity({
                 timestamp: Date.now(),

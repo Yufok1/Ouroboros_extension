@@ -1,8 +1,8 @@
 {
   "name": "champion-council",
   "displayName": "Champion Council - AI Model Orchestrator",
-  "description": "Local AI model orchestrator with 140+ MCP tools. Manage HuggingFace models, semantic memory, workflows, and developer collaboration.",
-  "version": "0.9.5",
+  "description": "Local AI model orchestrator with 156 MCP tools. Manage HuggingFace models, semantic memory, workflows, and developer collaboration.",
+  "version": "0.9.7",
   "galleryBanner": {
     "color": "#1a1a2e",
     "theme": "dark"
@@ -146,7 +146,7 @@
         "champion.tools.chat": {
           "type": "boolean",
           "default": true,
-          "description": "Enable chat and conversation tools (3 tools)",
+          "description": "Enable chat and conversation tools (4 tools: chat, reset, history, agent_chat)",
           "order": 11
         },
         "champion.tools.batch": {
@@ -170,7 +170,7 @@
         "champion.tools.felixbag": {
           "type": "boolean",
           "default": true,
-          "description": "Enable semantic memory tools (12 tools: get, put, search, catalog, export)",
+          "description": "Enable semantic memory tools (20 tools: get, put, search, catalog, export, docs, tree, checkpoint, versioning)",
           "order": 15
         },
         "champion.tools.huggingface": {
@@ -224,7 +224,7 @@
         "champion.tools.apiServer": {
           "type": "boolean",
           "default": false,
-          "description": "Enable API server and relay tools (6 tools)",
+          "description": "Enable API server, relay, and web search tools (7 tools)",
           "order": 24
         },
         "champion.tools.hold": {
@@ -378,6 +378,11 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
+    "@mariozechner/mini-lit": "^0.2.1",
+    "@mariozechner/pi-agent-core": "^0.55.3",
+    "@mariozechner/pi-ai": "^0.55.3",
+    "@mariozechner/pi-web-ui": "^0.55.3",
+    "lit": "^3.3.2",
     "nostr-tools": "^2.23.1",
     "svg-pan-zoom": "^3.6.2",
     "ws": "^8.19.0"

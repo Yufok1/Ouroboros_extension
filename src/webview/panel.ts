@@ -40,8 +40,6 @@ export class CouncilPanel {
 
     private repChains: Map<string, ReputationChain> = new Map();
 
-    private slotTerminals: Map<number, vscode.Terminal> = new Map();
-
     constructor(
         private extensionUri: vscode.Uri,
         private mcp: MCPServerManager,
@@ -144,6 +142,7 @@ export class CouncilPanel {
         const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js');
         const svgPanZoomPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'svg-pan-zoom.min.js');
         const peerjsPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'peerjs.min.js');
+
         this.panel = vscode.window.createWebviewPanel(
             'championCouncil', 'Champion Council', vscode.ViewColumn.One,
             {
@@ -1457,29 +1456,6 @@ export class CouncilPanel {
                 break;
             }
 
-            // ── Slot Drill-In Terminal (Native VS Code Terminal) ─────
-            case 'spawnSlotTerminal': {
-                const slotIdx = msg.slotIndex as number;
-                this.spawnSlotTerminal(slotIdx);
-                break;
-            }
-            case 'killSlotTerminal': {
-                const term = this.slotTerminals?.get(msg.slotIndex);
-                if (term) {
-                    term.dispose();
-                }
-                this.slotTerminals?.delete(msg.slotIndex);
-                break;
-            }
-            case 'requestSlotMetrics': {
-                const si = msg.slotIndex as number;
-                if (this.evaluator) {
-                    const metrics = this.evaluator.evaluate(si);
-                    this.send({ type: 'slotEvalMetrics', slotIndex: si, metrics });
-                }
-                break;
-            }
-
             // ── Reputation Chain ─────────────────────────────────────
 
             case 'repChainAppend': {
@@ -1693,110 +1669,6 @@ export class CouncilPanel {
                 break;
             }
         }
-    }
-
-    private async spawnSlotTerminal(slotIndex: number) {
-        // Dispose existing terminal for this slot
-        const existing = this.slotTerminals.get(slotIndex);
-        if (existing) { existing.dispose(); }
-
-        const cp = require('child_process') as typeof import('child_process');
-        const os = require('os') as typeof import('os');
-        const isWin = process.platform === 'win32';
-        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-
-        // Get slot info from capsule to determine provider type
-        let slotInfo: any = null;
-        try {
-            slotInfo = await this.callToolParsed('slot_info', { slot: slotIndex }, { suppressActivity: true, source: 'internal' });
-        } catch { /* slot_info may fail if capsule isn't running */ }
-
-        const modelSource = slotInfo?.model_source || slotInfo?.model_id || slotInfo?.name || '';
-        const slotLabel = slotInfo?.name || modelSource || `slot-${slotIndex}`;
-        const isRemoteUrl = modelSource.startsWith('http://') || modelSource.startsWith('https://');
-
-        // Ensure the OpenAI-compatible API bridge is running on port 8420
-        try {
-            await this.callToolParsed('start_api_server', { port: 8420 }, { suppressActivity: true, source: 'internal' });
-        } catch { /* may already be running or capsule not ready */ }
-
-        // Detect Pi CLI availability
-        let hasPi = false;
-        let useNpx = false;
-        try {
-            cp.execSync(isWin ? 'where pi' : 'which pi', { stdio: 'ignore' });
-            hasPi = true;
-        } catch {
-            try {
-                cp.execSync('npx --yes @mariozechner/pi-coding-agent --version', { stdio: 'ignore', timeout: 15000 });
-                hasPi = true;
-                useNpx = true;
-            } catch { /* Pi not available */ }
-        }
-
-        // Build the shell command and environment for the native terminal
-        const env: Record<string, string> = { TERM: 'xterm-256color' };
-        let shellCommand: string;
-
-        if (hasPi) {
-            // Generate per-slot Pi config in a temp directory
-            const tmpDir = path.join(os.tmpdir(), `champion-pi-slot-${slotIndex}`);
-            try { fs.mkdirSync(tmpDir, { recursive: true }); } catch { /* exists */ }
-
-            // ALL slots route through the capsule API bridge — local AND remote providers.
-            // Remote providers are plugged as slots via RemoteProviderProxy, so invoke_slot
-            // handles them identically. This ensures Dreamer rewards, evaluator metrics,
-            // CASCADE logging, and MCP tool control all work for every slot.
-            const apiBase = `http://localhost:8420/v1`;
-            const modelsConfig: any = { providers: {} };
-            const modelId = `slot-${slotIndex}`;
-            const providerName = `capsule-slot-${slotIndex}`;
-
-            modelsConfig.providers[providerName] = {
-                baseUrl: apiBase,
-                api: 'openai-completions',
-                apiKey: 'local',
-                models: [{ id: modelId, name: slotLabel }]
-            };
-
-            fs.writeFileSync(path.join(tmpDir, 'models.json'), JSON.stringify(modelsConfig, null, 2));
-            env['PI_CONFIG_DIR'] = tmpDir;
-
-            const piExe = useNpx ? 'npx @mariozechner/pi-coding-agent' : 'pi';
-            shellCommand = `${piExe} --provider ${providerName} --model ${modelId}`;
-        } else {
-            // No Pi CLI — open a shell with instructions
-            shellCommand = isWin
-                ? `echo Pi CLI not found. Install: npm install -g @mariozechner/pi-coding-agent && echo. && echo Manual launch: pi --provider openai-compatible --baseUrl http://localhost:8420/v1 --model slot-${slotIndex} && cmd /k`
-                : `echo "Pi CLI not found. Install: npm install -g @mariozechner/pi-coding-agent" && echo "" && echo "Manual launch: pi --provider openai-compatible --baseUrl http://localhost:8420/v1 --model slot-${slotIndex}" && exec $SHELL`;
-        }
-
-        // Create a REAL VS Code terminal — native, interactive, drillable
-        const terminal = vscode.window.createTerminal({
-            name: `Pi: ${slotLabel} [slot ${slotIndex}]`,
-            cwd,
-            env,
-            iconPath: new vscode.ThemeIcon('hubot'),
-            message: `── Champion Council ── Slot ${slotIndex}: ${slotLabel} ──`
-        });
-
-        // Show the terminal and send the command
-        terminal.show(false); // false = don't steal focus from current editor
-        terminal.sendText(shellCommand);
-
-        this.slotTerminals.set(slotIndex, terminal);
-
-        // Track terminal disposal
-        const disposeListener = vscode.window.onDidCloseTerminal(t => {
-            if (t === terminal) {
-                this.slotTerminals.delete(slotIndex);
-                this.send({ type: 'slotTerminalExited', slotIndex, code: 0 });
-                disposeListener.dispose();
-            }
-        });
-        this.disposables.push(disposeListener);
-
-        this.send({ type: 'slotTerminalReady', slotIndex });
     }
 
     private getActiveWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
@@ -3082,15 +2954,12 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     background: var(--surface);
     position: relative;
     cursor: default;
+    overflow: hidden;
+    min-width: 0;
 }
 .slot-card.occupied {
     border-color: var(--accent);
     border-left-width: 3px;
-    cursor: pointer;
-}
-.slot-card.occupied:hover {
-    background: var(--surface2);
-    border-color: var(--green);
 }
 .slot-card.plugging {
     border-color: var(--amber);
@@ -3162,6 +3031,267 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     gap: 4px;
     flex-wrap: wrap;
 }
+.slot-actions .btn-chat {
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 700;
+}
+
+/* ── AGENT CHAT (inside council tab, content swap) ── */
+#council-grid-view { display: block; }
+#tab-council.chat-active #council-grid-view { display: none; }
+
+.achat-view {
+    display: none;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+#tab-council.chat-active .achat-view { display: flex; }
+#tab-council.chat-active { padding: 0; }
+
+.achat-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 2px solid var(--accent);
+    background: var(--surface);
+    flex-shrink: 0;
+}
+.achat-back {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 5px 12px;
+    cursor: pointer;
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.achat-back:hover { border-color: var(--accent); color: var(--accent); }
+.achat-title {
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--accent);
+    flex: 1;
+}
+.achat-session {
+    font-size: 9px;
+    color: var(--text-dim);
+    font-family: monospace;
+}
+
+.achat-model-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.achat-model-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0;
+}
+.achat-model-name {
+    font-weight: 700; font-size: 11px; color: var(--text); flex: 1;
+}
+.achat-model-meta {
+    display: flex; gap: 8px; font-size: 9px; color: var(--text-dim);
+}
+.achat-tag {
+    padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06);
+    text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;
+}
+.achat-tag.type-llm { color: var(--green); }
+.achat-tag.type-embed { color: var(--accent); }
+.achat-tag.type-class { color: var(--amber); }
+.achat-tag.type-rerank { color: #c084fc; }
+
+.achat-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: rgba(255,255,255,0.02);
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+.achat-tool-count {
+    background: rgba(255,255,255,0.05);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+.achat-iter-label { margin-left: auto; }
+.achat-toolbar select, .achat-toolbar input[type="number"] {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    font-size: 9px; padding: 2px 6px; border-radius: 3px; width: 50px;
+}
+
+.achat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+}
+.achat-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    opacity: 0.5;
+    text-align: center;
+    line-height: 1.8;
+}
+
+.achat-msg {
+    max-width: 88%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 12px;
+    line-height: 1.6;
+    word-break: break-word;
+    white-space: pre-wrap;
+    animation: achat-fade-in 0.2s ease;
+}
+@keyframes achat-fade-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+.achat-msg.user {
+    align-self: flex-end;
+    background: var(--accent);
+    color: var(--bg);
+    border-bottom-right-radius: 2px;
+}
+.achat-msg.assistant {
+    align-self: flex-start;
+    background: var(--surface2);
+    color: var(--text);
+    border-bottom-left-radius: 2px;
+    border: 1px solid var(--border);
+}
+.achat-msg.system-info {
+    align-self: center;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 10px;
+    padding: 4px 12px;
+    opacity: 0.6;
+}
+.achat-msg.tool-trace {
+    align-self: flex-start;
+    max-width: 100%;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: monospace;
+    padding: 8px 12px;
+    border-radius: 4px;
+}
+.achat-msg.tool-trace .trace-header {
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.achat-msg.tool-trace .trace-line {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 0;
+}
+.achat-msg.tool-trace .trace-tool-name { color: var(--text); font-weight: 600; }
+.achat-msg.tool-trace .trace-status-ok { color: var(--green); }
+.achat-msg.tool-trace .trace-status-err { color: #e11d48; }
+.achat-msg.tool-trace .trace-preview { color: var(--text-dim); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+.achat-msg.error {
+    align-self: center;
+    background: rgba(225,29,72,0.1);
+    color: #e11d48;
+    font-size: 11px;
+    border: 1px solid rgba(225,29,72,0.25);
+    border-radius: 6px;
+    padding: 8px 14px;
+}
+.achat-msg .achat-ts {
+    display: block;
+    font-size: 8px;
+    opacity: 0.4;
+    margin-top: 4px;
+    text-align: right;
+}
+
+.achat-thinking-bar {
+    flex-shrink: 0;
+    padding: 8px 16px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: none;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--amber);
+}
+.achat-thinking-bar.active { display: flex; }
+.achat-thinking-bar .achat-spinner {
+    width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--amber); border-radius: 50%;
+    animation: achat-spin 0.8s linear infinite;
+}
+@keyframes achat-spin { to { transform: rotate(360deg); } }
+.achat-thinking-bar .achat-elapsed { margin-left: auto; font-family: monospace; font-size: 10px; color: var(--text-dim); }
+
+.achat-input-bar {
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+}
+.achat-input-bar input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: var(--mono);
+}
+.achat-input-bar input:focus { border-color: var(--accent); outline: none; }
+.achat-input-bar .achat-send {
+    padding: 8px 20px;
+    font-weight: 700;
+    font-size: 11px;
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: opacity 0.15s;
+}
+.achat-input-bar .achat-send:hover { opacity: 0.85; }
+.achat-input-bar .achat-send:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
 
 .council-controls {
     margin-top: 16px;
@@ -3207,155 +3337,6 @@ body.reduce-motion, body.reduce-motion * { transition: none !important; animatio
     0% { transform: translateX(-100%); width: 40%; }
     50% { transform: translateX(100%); width: 60%; }
     100% { transform: translateX(250%); width: 40%; }
-}
-
-/* ── SLOT DRILL-IN ── */
-.slot-drill { display: none; }
-.slot-drill.active { display: flex; flex-direction: column; gap: 12px; }
-.slot-drill-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 14px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-}
-.slot-drill-back {
-    cursor: pointer;
-    color: var(--accent);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    border: 1px solid var(--accent);
-    padding: 3px 10px;
-    background: none;
-    font-family: var(--mono);
-}
-.slot-drill-back:hover { background: var(--accent); color: var(--surface); }
-.slot-drill-identity { flex: 1; }
-.slot-drill-model {
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--text);
-    margin-bottom: 2px;
-}
-.slot-drill-meta {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: 9px;
-    color: var(--text-dim);
-}
-.slot-drill-badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    font-weight: 700;
-}
-.slot-drill-badge.anthropic { border-color: #d4a574; color: #d4a574; }
-.slot-drill-badge.openai { border-color: #74d4a5; color: #74d4a5; }
-.slot-drill-badge.google { border-color: #4488ff; color: #4488ff; }
-.slot-drill-badge.local { border-color: var(--accent); color: var(--accent); }
-.slot-drill-badge.huggingface { border-color: #ffcc00; color: #ffcc00; }
-.slot-drill-badge.remote { border-color: #cc88ff; color: #cc88ff; }
-.slot-drill-metrics {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 8px;
-}
-.slot-metric-card {
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-}
-.slot-metric-label {
-    font-size: 8px;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    color: var(--text-dim);
-    margin-bottom: 2px;
-}
-.slot-metric-value {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--accent);
-}
-.slot-metric-value.warn { color: var(--amber); }
-.slot-metric-value.bad { color: var(--red); }
-.slot-drill-activity {
-    border: 1px solid var(--border);
-    background: var(--surface);
-    max-height: 200px;
-    overflow-y: auto;
-}
-.slot-drill-activity-head {
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    color: var(--text-dim);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.slot-activity-item {
-    padding: 5px 12px;
-    border-bottom: 1px solid var(--border);
-    font-size: 10px;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}
-.slot-activity-item:last-child { border-bottom: none; }
-.slot-activity-source {
-    font-size: 8px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 1px 5px;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    white-space: nowrap;
-}
-.slot-activity-source.mcp { border-color: var(--accent); color: var(--accent); }
-.slot-activity-source.terminal { border-color: var(--blue); color: var(--blue); }
-.slot-activity-source.workflow { border-color: var(--amber); color: var(--amber); }
-.slot-activity-tool { color: var(--accent); font-weight: 600; white-space: nowrap; }
-.slot-activity-preview { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.slot-activity-latency { color: var(--text-dim); white-space: nowrap; }
-.slot-activity-status { font-size: 9px; }
-.slot-activity-status.ok { color: var(--green); }
-.slot-activity-status.fail { color: var(--red); }
-.slot-drill-terminal-wrap {
-    border: 1px solid var(--border);
-    background: #000;
-    min-height: 300px;
-    position: relative;
-}
-.slot-drill-terminal-head {
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    color: var(--text-dim);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.slot-drill-terminal {
-    height: 320px;
-    padding: 4px;
-}
-.slot-drill-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
 }
 
 /* ── MEMORY TAB ── */
@@ -4876,7 +4857,6 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 .dvm-job-list { padding: 12px; }
 .dvm-job-card { border: 1px solid var(--border); padding: 10px; margin-bottom: 8px; background: var(--surface); }
 .dvm-result { margin-top: 8px; padding: 8px; background: var(--surface2); border: 1px solid var(--border); font-size: 10px; white-space: pre-wrap; }
-
 </style>
 </head>
 <body>
@@ -4887,7 +4867,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     <div class="header-status">
         <div class="stat"><span class="dot off" id="hd-dot"></span> <span id="hd-status">CONNECTING</span></div>
         <div class="stat" id="hd-uptime">--:--:--</div>
-        <div class="stat" id="hd-tools">0 / 134 TOOLS</div>
+        <div class="stat" id="hd-tools">0 / 156 TOOLS</div>
         <div class="stat" id="hd-port">:----</div>
     </div>
 </div>
@@ -5014,7 +4994,6 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <div class="slots-grid" id="slots-grid"></div>
         <div class="council-controls">
             <button onclick="openPlugModal()">PLUG MODEL</button>
-            <button onclick="openPlugProviderModal()">PLUG PROVIDER</button>
             <button onclick="callTool('list_slots',{})">REFRESH SLOTS</button>
             <button onclick="callTool('council_status',{})">CONSENSUS STATUS</button>
             <button class="btn-dim" onclick="callTool('all_slots',{})">INVOKE ALL</button>
@@ -5024,31 +5003,40 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
             <div class="diag-output" id="council-output" style="min-height:60px;">Run a council command above.</div>
         </div>
     </div>
-    <!-- DRILL-IN VIEW (shown when a slot card is clicked) -->
-    <div class="slot-drill" id="slot-drill-view">
-        <div class="slot-drill-header">
-            <button class="slot-drill-back" id="slot-drill-back">← GRID</button>
-            <div class="slot-drill-identity">
-                <div class="slot-drill-model" id="slot-drill-model">—</div>
-                <div class="slot-drill-meta" id="slot-drill-meta"></div>
-            </div>
-            <div id="slot-drill-badges"></div>
+
+    <!-- AGENT CHAT VIEW (hidden until CHAT clicked) -->
+    <div id="agent-chat-view" class="achat-view">
+        <div class="achat-header">
+            <button class="achat-back" onclick="closeAgentChat()">&#8592; Grid</button>
+            <span class="achat-title" id="achat-title">AGENT CHAT</span>
+            <span class="achat-session" id="achat-session-id"></span>
+            <button class="btn-dim" onclick="resetAgentChat()" style="font-size:9px;padding:3px 10px;">NEW SESSION</button>
         </div>
-        <div class="slot-drill-metrics" id="slot-drill-metrics"></div>
-        <div class="slot-drill-actions" id="slot-drill-actions"></div>
-        <div class="slot-drill-activity" id="slot-drill-activity">
-            <div class="slot-drill-activity-head">
-                <span>ACTIVITY FEED</span>
-                <span id="slot-drill-activity-count">0 events</span>
-            </div>
-            <div id="slot-drill-activity-list"></div>
+        <div class="achat-model-card" id="achat-model-card">
+            <span class="achat-model-dot"></span>
+            <span class="achat-model-name" id="achat-model-name">&mdash;</span>
+            <span class="achat-model-meta" id="achat-model-meta"></span>
         </div>
-        <div class="slot-drill-terminal-wrap" id="slot-drill-terminal-wrap">
-            <div class="slot-drill-terminal-head">
-                <span>INTERACTIVE TERMINAL</span>
-                <span id="slot-drill-terminal-status">disconnected</span>
-            </div>
-            <div class="slot-drill-terminal" id="slot-drill-terminal"></div>
+        <div class="achat-toolbar">
+            <span>Granted tools:</span>
+            <span class="achat-tool-count" id="achat-tool-count">&mdash;</span>
+            <span>Blocked: <span id="achat-blocked-count">10</span></span>
+            <span class="achat-iter-label">Iterations:</span>
+            <input type="number" id="achat-max-iter" value="2" min="1" max="20" style="width:40px;" title="Max agentic iterations" />
+            <span>Tokens:</span>
+            <input type="number" id="achat-max-tokens" value="256" min="32" max="4096" step="32" style="width:55px;" title="Max generation tokens per turn" />
+        </div>
+        <div class="achat-messages" id="achat-messages">
+            <div class="achat-empty">Send a message to start a conversation.<br/>The agent can use tools autonomously.</div>
+        </div>
+        <div class="achat-thinking-bar" id="achat-thinking">
+            <div class="achat-spinner"></div>
+            <span>Agent is thinking <span style="color:var(--text-dim);">(CPU inference may take a while)</span></span>
+            <span class="achat-elapsed" id="achat-elapsed">0s</span>
+        </div>
+        <div class="achat-input-bar">
+            <input id="achat-input" placeholder="Message the agent..." onkeydown="if(event.key==='Enter'&&!event.shiftKey)sendAgentChat()" />
+            <button class="achat-send" id="achat-send-btn" onclick="sendAgentChat()">Send</button>
         </div>
     </div>
 </div>
@@ -5097,7 +5085,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 
 <!-- ═══════════════ TOOLS TAB ═══════════════ -->
 <div class="content" id="tab-tools">
-    <div class="section-head">TOOL REGISTRY (146 TOOLS / 21 CATEGORIES)</div>
+    <div class="section-head">TOOL REGISTRY (156 TOOLS / 21 CATEGORIES)</div>
     <div style="margin-bottom:12px;display:flex;gap:8px;">
         <button onclick="vscode.postMessage({command:'openSettings'})">OPEN SETTINGS</button>
         <button class="btn-dim" onclick="callTool('get_capabilities',{})">QUERY CAPABILITIES</button>
@@ -6239,37 +6227,6 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
     </div>
 </div>
 
-<!-- ═══════════════ PLUG PROVIDER MODAL ═══════════════ -->
-<div class="modal-overlay" id="plug-provider-modal">
-    <div class="modal">
-        <div class="modal-title">PLUG REMOTE PROVIDER</div>
-        <div style="font-size:9px;color:var(--text-dim);margin-bottom:10px;">
-            Connect any OpenAI-compatible endpoint as a council slot.
-            Claude, Gemini, GPT-4, Mistral, Ollama — anything with a /v1/chat/completions endpoint.
-        </div>
-        <div class="field">
-            <label>Provider URL</label>
-            <input id="plug-provider-url" placeholder="https://api.anthropic.com/v1 or http://localhost:11434/v1" />
-        </div>
-        <div class="field">
-            <label>API Key (optional — appended as ?key=...)</label>
-            <input id="plug-provider-key" placeholder="sk-..." type="password" />
-        </div>
-        <div class="field">
-            <label>Model Name (optional — appended as ?model=...)</label>
-            <input id="plug-provider-model" placeholder="claude-sonnet-4-20250514" />
-        </div>
-        <div class="field">
-            <label>Slot Name (optional)</label>
-            <input id="plug-provider-slot-name" placeholder="claude-sonnet" />
-        </div>
-        <div class="modal-actions">
-            <button onclick="doPlugProvider()">PLUG PROVIDER</button>
-            <button class="btn-dim" onclick="closeModals()">CANCEL</button>
-        </div>
-    </div>
-</div>
-
 <!-- ═══════════════ INDUCT MODAL ═══════════════ -->
 <div class="modal-overlay" id="induct-modal">
     <div class="modal">
@@ -6465,6 +6422,8 @@ ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
     });
 })();
 </script>
+
+
 </body>
 </html>`;
     }

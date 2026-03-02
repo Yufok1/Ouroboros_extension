@@ -84,6 +84,8 @@ media/levels.txt
 bug_list_v080.md
 test_write.txt
 INTELLIGENCE_REPORT.md
+COMMS_ARCHITECTURE.md
+dreamer_config.json
 plans/**
 .capsule_state.json
 .github/**

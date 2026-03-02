@@ -5,9 +5,10 @@ Local-first AI orchestration for VS Code and compatible editors. Run multi-model
 ## Core Features
 
 - **Multi-Slot Model Council** — Plug HuggingFace models into council slots and run inference, debate, consensus, and chaining. Up to 32 slots, capsule-driven. Smart loader auto-detects model type (LLM, Embedding, Reranker, SEQ2SEQ, Vision, VLM, Classifier) from actual config.json metadata and routes to the correct loader. Cross-encoders are loaded via `CrossEncoder()` with sentence-pair scoring. Token budgets are read from each model's actual config (`max_position_embeddings`, `generation_config`) at plug time — no hardcoded limits. Rich metadata cards show model author, task, downloads, license, and size.
-- **140+ MCP Tools** — Full MCP/SSE tool surface for IDE agents and automation. Works with any MCP client (Claude Code, Cursor, Windsurf, etc.).
+- **156 MCP Tools** — Full MCP/SSE tool surface for IDE agents and automation. Works with any MCP client (Claude Code, Cursor, Windsurf, etc.).
 - **Workflow Engine v2.2** — 10 node types: `tool` (universal MCP tool caller), `agent` (plugged model with granted tools loop), `input`, `output`, `fan_out` (parallel), `http`, `if`, `set`, `merge`, and `web_search`. Build DAGs with expression interpolation, conditional branching, agentic reasoning loops, and live execution tracing.
-- **Semantic Memory (FelixBag)** — Local embedding store with search, catalog, induction, and export. Persistent across sessions.
+- **Agentic Slot Chat** — Drill into any plugged model slot for interactive agent conversations. Agents autonomously call MCP tools (CASCADE, Diagnostics, FelixBag, web search) within a sandboxed tool grant, with real-time tool trace visibility and session persistence.
+- **Semantic Memory (FelixBag)** — Local embedding store with search, catalog, induction, and export. Persistent across sessions. Git-like document versioning with checkpointing, diff, and restore.
 - **Activity Feed** — Real-time tool call monitoring from all connected MCP clients. Click to expand full args, results, and timing. External agent activity detected via log polling across Windsurf, Cursor, VS Code, Kiro, and Antigravity.
 - **Community (Nostr)** — Decentralized marketplace, live chat, encrypted DMs, NIP-57 zaps, and privacy controls.
 - **P2P Voice Rooms** — Real-time voice communication via PeerJS/WebRTC with Nostr relay signaling (NIP-53). No server hosting required — fully peer-to-peer.
@@ -83,7 +84,7 @@ The extension runs an MCP server on `http://127.0.0.1:8765/sse`. Any MCP-compati
 - **Cursor / Windsurf** — Add the SSE endpoint to your MCP configuration
 - **Custom clients** — Connect via SSE transport to the endpoint above
 
-All 140+ tools are available to any connected client. The Control Panel's activity feed shows tool calls from all sources.
+All 156 tools are available to any connected client. The Control Panel's activity feed shows tool calls from all sources.
 
 ## Requirements
 
@@ -116,13 +117,12 @@ All settings live under `champion.*` in VS Code Settings.
 - `Champion: Stop MCP Server`
 - `Champion: Generate MCP Config for IDE`
 
-## What's New in 0.9.4
+## What's New in 0.9.7
 
-- **Host Capacity Guardrails** - Added live capacity preflight before `plug_model` / `hub_plug` to reduce OOM risk during model loading.
-- **Dynamic Runtime Snapshot** - Runtime capacity telemetry now includes RAM pressure and GPU VRAM availability to drive safer orchestration decisions.
-- **Controlled Override Path** - Explicit `allow_oom_risk: true` bypass is available when you intentionally want to force a risky plug attempt.
-- **Marketplace Version Bump** - Extension package bumped to `0.9.4` with aligned lockfile metadata.
-- **Fresh Build Artifact** - Extension recompiled and VSIX rebuilt for upload.
+- **Agentic Slot Chat** — Click CHAT on any occupied slot to open a full drill-down agent conversation. Models autonomously call tools, with real-time tool traces and session persistence.
+- **FelixBag Document Versioning** — 8 new tools for sandboxed file operations, checkpointing, diff, and restore within FelixBag memory.
+- **Web Search** — First-class `web_search` MCP tool available to agents and direct callers.
+- **156 Tools** — Tool registry expanded from 146 to 156 across 21 categories, with updated descriptions and frontend alignment.
 
 See [CHANGELOG.md](https://github.com/Yufok1/Ouroboros_extension/blob/HEAD/CHANGELOG.md) for full release history.
 

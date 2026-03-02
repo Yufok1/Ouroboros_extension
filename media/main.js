@@ -29,10 +29,6 @@
     let _wfColorCache = {};     // workflowId -> '#rrggbb'
     let _wfColorIndex = 0;
 
-    // ── SLOT DRILL-IN STATE ──
-    let _slotDrill = { active: false, slotIndex: -1, termActive: false };
-    let _slotDrillActivity = []; // per-slot activity entries
-
     // ── NIP-88: POLL STATE ──
     var _polls = {}; // pollId -> { question, options, votes, voted, expired }
     var _pollVotes = {}; // pollId -> { optionIndex -> count }
@@ -710,27 +706,6 @@
                 case 'uxSettings':
                     handleUXSettings(msg.settings || {});
                     break;
-                case 'slotTerminalReady':
-                    if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex) {
-                        var stEl = document.getElementById('slot-drill-terminal-status');
-                        if (stEl) stEl.textContent = 'Native terminal open — check VS Code terminal panel';
-                        var btnR = document.getElementById('slot-drill-launch-terminal');
-                        if (btnR) { btnR.textContent = '● TERMINAL OPEN'; btnR.disabled = true; btnR.style.opacity = '0.5'; }
-                    }
-                    break;
-                case 'slotTerminalExited':
-                    if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex) {
-                        var stEl2 = document.getElementById('slot-drill-terminal-status');
-                        if (stEl2) stEl2.textContent = 'Terminal closed';
-                        var btnE = document.getElementById('slot-drill-launch-terminal');
-                        if (btnE) { btnE.textContent = '▶ OPEN Pi CLI TERMINAL'; btnE.disabled = false; btnE.style.opacity = '1'; }
-                    }
-                    break;
-                case 'slotEvalMetrics':
-                    if (_slotDrill.active && msg.slotIndex === _slotDrill.slotIndex && msg.metrics) {
-                        _updateSlotMetricsFromEval(msg.metrics);
-                    }
-                    break;
                 case 'nostrPollCreated':
                     mpToast('Poll published', 'success', 2600);
                     document.getElementById('poll-create-form').style.display = 'none';
@@ -825,7 +800,7 @@
         var toolsEl = document.getElementById('hd-tools');
         if (toolsEl) {
             toolsEl.textContent = (st.toolCounts ? st.toolCounts.enabled || 0 : 0) +
-                ' / ' + (st.toolCounts ? st.toolCounts.total || 134 : 134) + ' TOOLS';
+                ' / ' + (st.toolCounts ? st.toolCounts.total || 156 : 156) + ' TOOLS';
         }
         var portEl = document.getElementById('hd-port');
         if (portEl) portEl.textContent = ':' + (st.port || '----');
@@ -976,7 +951,24 @@
         return 'empty';
     }
 
+    function _friendlyModelName(raw) {
+        if (!raw) return '';
+        var s = String(raw);
+        // HuggingFace cache path: D:\huggingface\hub\models--Org--Name\snapshots\hash
+        var cacheMatch = s.match(/models--([^\\\/]+)--([^\\\/]+)/);
+        if (cacheMatch) return cacheMatch[1] + '/' + cacheMatch[2];
+        // Strip trailing snapshot hash directories
+        s = s.replace(/[\\\/]snapshots[\\\/][a-f0-9]+\/?$/i, '');
+        // If it's still a long path, take just the last meaningful segment
+        var parts = s.replace(/\\/g, '/').split('/').filter(function (p) { return p; });
+        if (parts.length > 2) s = parts[parts.length - 1];
+        // Cap length
+        if (s.length > 40) s = s.substring(0, 37) + '...';
+        return s;
+    }
+
     // ── SLOTS RENDER ──
+    var _lastSlotsArr = []; // extracted per-slot array for agent chat lookups
     function renderSlots(data) {
         _lastSlotsData = data;
         var grid = document.getElementById('slots-grid');
@@ -992,6 +984,7 @@
             }
             slotsArr = d.slots || d || [];
         } catch (err) { slotsArr = []; }
+        _lastSlotsArr = slotsArr;
 
         // Clear unplugging state for slots that are now confirmed empty
         var unpKeys = Object.keys(_unpluggingSlots);
@@ -1116,13 +1109,14 @@
             if (isActivelyPlugging) {
                 var pInfo = pluggingBySlot[i];
                 var elapsed = Math.round((Date.now() - pInfo.startTime) / 1000);
-                html += '<div class="slot-model-name" style="color:var(--amber)">' + escHtml(pInfo.modelId) + '</div>';
+                html += '<div class="slot-model-name" style="color:var(--amber)" title="' + escHtml(pInfo.modelId) + '">' + escHtml(_friendlyModelName(pInfo.modelId) || pInfo.modelId) + '</div>';
                 var phaseText = pInfo.phase ? escHtml(pInfo.phase.substring(0, 60)) : 'Loading...';
                 html += '<div class="slot-detail">' + phaseText + ' (' + elapsed + 's)</div>';
                 html += '<div class="plug-bar"><div class="plug-bar-fill"></div></div>';
             } else {
-                var modelLabel = slot.model_source || slot.model_id || slot.name || 'VACANT';
-                html += '<div class="slot-model-name">' + escHtml(modelLabel) + '</div>';
+                var modelRaw = slot.model_source || slot.model_id || slot.name || 'VACANT';
+                var modelLabel = _friendlyModelName(modelRaw) || modelRaw;
+                html += '<div class="slot-model-name" title="' + escHtml(modelRaw) + '">' + escHtml(modelLabel) + '</div>';
                 html += '<div class="slot-detail">' + detailText + '</div>';
 
                 // Rich metadata card from hub_info cache
@@ -1142,6 +1136,7 @@
 
             if (occupied) {
                 html += '<div class="slot-actions">';
+                html += '<button class="btn-dim btn-chat" data-action="chat" data-slot="' + i + '">CHAT</button>';
                 html += '<button class="btn-dim" data-action="unplug" data-slot="' + i + '">UNPLUG</button>';
                 html += '<button class="btn-dim" data-action="invoke" data-slot="' + i + '">INVOKE</button>';
                 html += '<button class="btn-dim" data-action="clone" data-slot="' + i + '">CLONE</button>';
@@ -1167,28 +1162,19 @@
         if (!grid.dataset.actionsBound) {
             grid.addEventListener('click', function (e) {
                 var btn = e.target.closest('[data-action]');
-                if (btn) {
-                    e.stopPropagation();
-                    var action = btn.dataset.action;
-                    var slot = parseInt(btn.dataset.slot);
-                    if (action === 'unplug') {
-                        _unpluggingSlots[slot] = { startTime: Date.now() };
-                        if (_lastSlotsData) renderSlots(_lastSlotsData);
-                        callTool('unplug_slot', { slot: slot });
-                    }
-                    else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
-                    else if (action === 'clone') callTool('clone_slot', { slot: slot });
-                    return;
+                if (!btn) return;
+                var action = btn.dataset.action;
+                var slot = parseInt(btn.dataset.slot);
+                if (action === 'chat') {
+                    openAgentChat(slot);
                 }
-                // Click on slot card itself (not a button) → drill-in
-                var card = e.target.closest('.slot-card.occupied');
-                if (card) {
-                    var slotNum = card.querySelector('.slot-num');
-                    if (slotNum) {
-                        var idx = parseInt(slotNum.textContent) - 1;
-                        if (idx >= 0) openSlotDrill(idx);
-                    }
+                else if (action === 'unplug') {
+                    _unpluggingSlots[slot] = { startTime: Date.now() };
+                    if (_lastSlotsData) renderSlots(_lastSlotsData);
+                    callTool('unplug_slot', { slot: slot });
                 }
+                else if (action === 'invoke') callTool('invoke_slot', { slot: slot, text: 'test' });
+                else if (action === 'clone') callTool('clone_slot', { slot: slot });
             });
             grid.dataset.actionsBound = '1';
         }
@@ -1246,336 +1232,6 @@
         if (_plugTimer) { clearInterval(_plugTimer); _plugTimer = null; }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    // SLOT DRILL-IN — Operations Console for Plugged Models
-    // ══════════════════════════════════════════════════════════════
-
-    function _detectProvider(slot) {
-        var src = String(slot.model_source || slot.model_id || slot.name || '').toLowerCase();
-        if (src.indexOf('anthropic') >= 0 || src.indexOf('claude') >= 0) return 'anthropic';
-        if (src.indexOf('openai') >= 0 || src.indexOf('gpt') >= 0 || src.indexOf('chatgpt') >= 0) return 'openai';
-        if (src.indexOf('google') >= 0 || src.indexOf('gemini') >= 0) return 'google';
-        if (src.indexOf('http://') >= 0 || src.indexOf('https://') >= 0) return 'remote';
-        if (src.indexOf('/') >= 0) return 'huggingface';
-        return 'local';
-    }
-
-    function _providerLabel(provider) {
-        var map = { anthropic: 'ANTHROPIC', openai: 'OPENAI', google: 'GOOGLE', remote: 'REMOTE', huggingface: 'HUGGINGFACE', local: 'LOCAL' };
-        return map[provider] || 'LOCAL';
-    }
-
-    function openSlotDrill(slotIndex) {
-        _slotDrill.active = true;
-        _slotDrill.slotIndex = slotIndex;
-        _slotDrillActivity = [];
-        var gridView = document.getElementById('council-grid-view');
-        var drillView = document.getElementById('slot-drill-view');
-        if (gridView) gridView.style.display = 'none';
-        if (drillView) drillView.classList.add('active');
-        renderSlotDrillDetail();
-        _initSlotTerminal();
-        // Populate activity from global log
-        _populateSlotActivity(slotIndex);
-    }
-
-    function closeSlotDrill() {
-        _slotDrill.active = false;
-        _slotDrill.slotIndex = -1;
-        _disposeSlotTerminal();
-        var gridView = document.getElementById('council-grid-view');
-        var drillView = document.getElementById('slot-drill-view');
-        if (gridView) gridView.style.display = '';
-        if (drillView) drillView.classList.remove('active');
-    }
-
-    function _getSlotData(index) {
-        if (!_lastSlotsData) return null;
-        var slotsArr = [];
-        try {
-            var d = _lastSlotsData;
-            if (d && d.content && Array.isArray(d.content) && d.content[0] && d.content[0].text) {
-                d = JSON.parse(d.content[0].text);
-            } else if (typeof d === 'string') {
-                d = JSON.parse(d);
-            }
-            slotsArr = d.slots || d || [];
-        } catch (e) { return null; }
-        return slotsArr[index] || null;
-    }
-
-    function renderSlotDrillDetail() {
-        var idx = _slotDrill.slotIndex;
-        var slot = _getSlotData(idx);
-        if (!slot) return;
-
-        var provider = _detectProvider(slot);
-        var modelLabel = slot.model_source || slot.model_id || slot.name || 'VACANT';
-        var modelType = slot.model_type || slot.type || 'unknown';
-
-        // Identity header
-        var modelEl = document.getElementById('slot-drill-model');
-        if (modelEl) modelEl.textContent = modelLabel;
-
-        var metaEl = document.getElementById('slot-drill-meta');
-        if (metaEl) {
-            metaEl.innerHTML =
-                '<span>SLOT ' + (idx + 1) + '</span>' +
-                '<span>' + escHtml(modelType).toUpperCase() + '</span>' +
-                '<span>' + escHtml(String(slot.status || 'ready')).toUpperCase() + '</span>';
-        }
-
-        var badgesEl = document.getElementById('slot-drill-badges');
-        if (badgesEl) {
-            badgesEl.innerHTML = '<span class="slot-drill-badge ' + provider + '">' + _providerLabel(provider) + '</span>';
-        }
-
-        // Metrics — request from evaluator
-        _renderSlotMetrics(idx);
-
-        // Action buttons
-        var actionsEl = document.getElementById('slot-drill-actions');
-        if (actionsEl) {
-            actionsEl.innerHTML =
-                '<button onclick="callTool(\'invoke_slot\',{slot:' + idx + ',text:\'test\'})">INVOKE</button>' +
-                '<button onclick="_slotDrillCompare(' + idx + ')">COMPARE</button>' +
-                '<button onclick="_slotDrillBenchmark(' + idx + ')">BENCHMARK</button>' +
-                '<button onclick="callTool(\'slot_info\',{slot:' + idx + '})">INFO</button>' +
-                '<button class="btn-dim" onclick="_slotDrillUnplug(' + idx + ')">UNPLUG</button>';
-        }
-    }
-
-    function _renderSlotMetrics(slotIndex) {
-        var metricsEl = document.getElementById('slot-drill-metrics');
-        if (!metricsEl) return;
-        // Request evaluation data from extension-side evaluator
-        vscode.postMessage({ command: 'requestSlotMetrics', slotIndex: slotIndex });
-        // Render placeholder metrics — will be updated when eval data arrives
-        var slot = _getSlotData(slotIndex);
-        var hubKey = slot ? (slot.model_source || slot.model_id) : null;
-        var hubMeta = hubKey ? _slotHubInfoCache[hubKey] : null;
-
-        metricsEl.innerHTML =
-            _metricCard('TOTAL CALLS', '—', '') +
-            _metricCard('SUCCESS RATE', '—', '') +
-            _metricCard('AVG LATENCY', '—', '') +
-            _metricCard('P95 LATENCY', '—', '') +
-            _metricCard('THROUGHPUT', '—', '') +
-            _metricCard('CONSISTENCY', '—', '') +
-            _metricCard('ERROR RATE', '—', '') +
-            _metricCard('LAST ACTIVE', '—', '');
-
-        // If we have hub metadata, show it
-        if (hubMeta) {
-            var extra = '';
-            if (hubMeta.author) extra += _metricCard('AUTHOR', escHtml(hubMeta.author), '');
-            if (hubMeta.downloads) extra += _metricCard('DOWNLOADS', _formatCount(hubMeta.downloads), '');
-            if (hubMeta.likes) extra += _metricCard('LIKES', _formatCount(hubMeta.likes), '');
-            if (hubMeta.size_mb && hubMeta.size_mb > 0) extra += _metricCard('SIZE', hubMeta.size_mb.toFixed(0) + ' MB', '');
-            if (extra) metricsEl.innerHTML += extra;
-        }
-    }
-
-    function _metricCard(label, value, cls) {
-        return '<div class="slot-metric-card"><div class="slot-metric-label">' + label +
-            '</div><div class="slot-metric-value ' + cls + '">' + value + '</div></div>';
-    }
-
-    function _updateSlotMetricsFromEval(evalData) {
-        var metricsEl = document.getElementById('slot-drill-metrics');
-        if (!metricsEl || !evalData) return;
-        var m = evalData;
-        var successCls = m.successRate >= 0.95 ? '' : (m.successRate >= 0.8 ? 'warn' : 'bad');
-        var errorCls = m.errorRate <= 0.05 ? '' : (m.errorRate <= 0.2 ? 'warn' : 'bad');
-        var latCls = m.avgLatencyMs <= 500 ? '' : (m.avgLatencyMs <= 2000 ? 'warn' : 'bad');
-        var lastActive = m.lastActive ? new Date(m.lastActive).toLocaleTimeString() : '—';
-
-        metricsEl.innerHTML =
-            _metricCard('TOTAL CALLS', String(m.totalCalls || 0), '') +
-            _metricCard('SUCCESS RATE', ((m.successRate || 0) * 100).toFixed(1) + '%', successCls) +
-            _metricCard('AVG LATENCY', (m.avgLatencyMs || 0).toFixed(0) + 'ms', latCls) +
-            _metricCard('P95 LATENCY', (m.p95LatencyMs || 0).toFixed(0) + 'ms', '') +
-            _metricCard('THROUGHPUT', (m.throughput || 0).toFixed(1) + '/min', '') +
-            _metricCard('CONSISTENCY', ((m.consistencyScore || 0) * 100).toFixed(0) + '%', '') +
-            _metricCard('ERROR RATE', ((m.errorRate || 0) * 100).toFixed(1) + '%', errorCls) +
-            _metricCard('LAST ACTIVE', lastActive, '');
-    }
-
-    function _populateSlotActivity(slotIndex) {
-        _slotDrillActivity = [];
-        var slotTools = ['invoke_slot', 'generate', 'classify', 'rerank', 'embed_text',
-            'forward', 'infer', 'deliberate', 'imagine', 'compare', 'debate', 'chain', 'all_slots'];
-        for (var i = 0; i < _activityLog.length; i++) {
-            var e = _activityLog[i];
-            if (!e) continue;
-            // Match events that target this specific slot
-            var targetSlot = e.args && (e.args.slot !== undefined ? e.args.slot : -1);
-            var isSlotSpecific = targetSlot === slotIndex;
-            var isBroadcast = slotTools.indexOf(e.tool) >= 0 && targetSlot === -1;
-            if (isSlotSpecific || isBroadcast) {
-                _slotDrillActivity.push(e);
-            }
-        }
-        _renderSlotActivityFeed();
-    }
-
-    function _renderSlotActivityFeed() {
-        var listEl = document.getElementById('slot-drill-activity-list');
-        var countEl = document.getElementById('slot-drill-activity-count');
-        if (!listEl) return;
-        if (countEl) countEl.textContent = _slotDrillActivity.length + ' events';
-
-        if (_slotDrillActivity.length === 0) {
-            listEl.innerHTML = '<div class="slot-activity-item" style="color:var(--text-dim);">No activity recorded for this slot yet.</div>';
-            return;
-        }
-
-        var html = '';
-        var items = _slotDrillActivity.slice(-30).reverse();
-        for (var i = 0; i < items.length; i++) {
-            var e = items[i];
-            var ts = new Date(e.timestamp).toLocaleTimeString();
-            var source = e.source || 'mcp';
-            var srcCls = source === 'terminal' ? 'terminal' : (source === 'workflow' ? 'workflow' : 'mcp');
-            var preview = '';
-            if (e.args) {
-                preview = e.args.text || e.args.prompt || e.args.input_text || '';
-                if (preview.length > 60) preview = preview.substring(0, 60) + '...';
-            }
-            var latency = e.durationMs >= 0 ? (e.durationMs + 'ms') : '';
-            var statusCls = e.error ? 'fail' : 'ok';
-            var statusText = e.error ? '✗' : '✓';
-
-            html += '<div class="slot-activity-item">' +
-                '<span class="slot-activity-source ' + srcCls + '">' + escHtml(source) + '</span>' +
-                '<span class="slot-activity-tool">' + escHtml(e.tool || '') + '</span>' +
-                '<span class="slot-activity-preview">' + escHtml(preview) + '</span>' +
-                '<span class="slot-activity-latency">' + latency + '</span>' +
-                '<span class="slot-activity-status ' + statusCls + '">' + statusText + '</span>' +
-                '<span style="color:var(--text-dim);font-size:9px;">' + ts + '</span>' +
-                '</div>';
-        }
-        listEl.innerHTML = html;
-    }
-
-    function _echoToSlotTerminal(event) {
-        // Activity echoing now goes through the activity list, not xterm
-        // This function is kept for compatibility — activity is tracked via _slotDrillActivity
-        if (!_slotDrill.active) return;
-    }
-
-    function _initSlotTerminal() {
-        var container = document.getElementById('slot-drill-terminal');
-        if (!container) return;
-
-        var slot = _getSlotData(_slotDrill.slotIndex);
-        var modelLabel = slot ? (slot.model_source || slot.model_id || slot.name || 'unknown') : 'unknown';
-        var provider = slot ? _detectProvider(slot) : 'local';
-
-        // Replace the xterm container with a launch panel for native terminal
-        container.innerHTML =
-            '<div style="padding:16px;text-align:center;">' +
-                '<div style="color:var(--accent);font-size:11px;letter-spacing:2px;margin-bottom:8px;">SLOT ' + (_slotDrill.slotIndex + 1) + ' — ' + escHtml(modelLabel.substring(0, 50)) + '</div>' +
-                '<div style="color:var(--text-dim);font-size:10px;margin-bottom:12px;">' + _providerLabel(provider) + ' │ ' + (slot ? (slot.model_type || 'auto') : '?') + '</div>' +
-                '<button id="slot-drill-launch-terminal" onclick="_launchNativeTerminal()" style="' +
-                    'background:var(--accent);color:#000;border:none;padding:10px 24px;font-size:12px;font-weight:bold;' +
-                    'cursor:pointer;letter-spacing:1px;border-radius:2px;margin-bottom:8px;">' +
-                    '▶ OPEN Pi CLI TERMINAL</button>' +
-                '<div id="slot-drill-terminal-status" style="color:var(--text-dim);font-size:9px;margin-top:6px;">Click to open a native VS Code terminal for this slot</div>' +
-            '</div>';
-
-        _slotDrill.termActive = false;
-    }
-
-    function _launchNativeTerminal() {
-        if (!_slotDrill.active || _slotDrill.slotIndex < 0) return;
-        // Ask the extension to spawn a real VS Code terminal
-        vscode.postMessage({ command: 'spawnSlotTerminal', slotIndex: _slotDrill.slotIndex });
-        _slotDrill.termActive = true;
-        var statusEl = document.getElementById('slot-drill-terminal-status');
-        if (statusEl) statusEl.textContent = 'Opening native terminal...';
-        var btn = document.getElementById('slot-drill-launch-terminal');
-        if (btn) { btn.textContent = '● TERMINAL OPEN'; btn.disabled = true; btn.style.opacity = '0.5'; }
-    }
-
-    function _disposeSlotTerminal() {
-        _slotDrill.termActive = false;
-        // Tell extension to kill the terminal
-        if (_slotDrill.slotIndex >= 0) {
-            vscode.postMessage({ command: 'killSlotTerminal', slotIndex: _slotDrill.slotIndex });
-        }
-    }
-
-    function _slotDrillCompare(slotIndex) {
-        // Find another plugged slot to compare against
-        var slotsArr = [];
-        try {
-            var d = _lastSlotsData;
-            if (d && d.content && Array.isArray(d.content) && d.content[0] && d.content[0].text) d = JSON.parse(d.content[0].text);
-            else if (typeof d === 'string') d = JSON.parse(d);
-            slotsArr = d.slots || d || [];
-        } catch (e) { return; }
-        var others = [];
-        for (var i = 0; i < slotsArr.length; i++) {
-            if (i !== slotIndex && _getSlotVisualState(slotsArr[i] || {}) === 'plugged') others.push(i);
-        }
-        if (others.length === 0) { mpToast('No other plugged slots to compare against', 'info', 2500); return; }
-        callTool('compare', { input_text: 'Explain the concept of emergence in complex systems.', slots: [slotIndex, others[0]] });
-    }
-
-    function _slotDrillBenchmark(slotIndex) {
-        var prompts = [
-            'What is 2+2?',
-            'Explain quantum entanglement in one sentence.',
-            'Write a Python function to reverse a string.'
-        ];
-        for (var i = 0; i < prompts.length; i++) {
-            callTool('invoke_slot', { slot: slotIndex, text: prompts[i] });
-        }
-        mpToast('Benchmark: ' + prompts.length + ' prompts sent to slot ' + (slotIndex + 1), 'info', 2500);
-    }
-
-    function _slotDrillUnplug(slotIndex) {
-        _unpluggingSlots[slotIndex] = { startTime: Date.now() };
-        callTool('unplug_slot', { slot: slotIndex });
-        closeSlotDrill();
-        mpToast('Unplugging slot ' + (slotIndex + 1) + '...', 'info', 2500);
-    }
-
-    // ── PLUG PROVIDER MODAL ──
-    function openPlugProviderModal() {
-        var modal = document.getElementById('plug-provider-modal');
-        if (modal) modal.classList.add('active');
-    }
-    // Expose to global scope for onclick
-    window.openPlugProviderModal = openPlugProviderModal;
-
-    function doPlugProvider() {
-        var url = (document.getElementById('plug-provider-url') || {}).value || '';
-        var key = (document.getElementById('plug-provider-key') || {}).value || '';
-        var model = (document.getElementById('plug-provider-model') || {}).value || '';
-        var slotName = (document.getElementById('plug-provider-slot-name') || {}).value || '';
-        if (!url) { mpToast('Provider URL is required', 'error', 2500); return; }
-
-        // Build the URL with query params for RemoteProviderProxy
-        var fullUrl = url;
-        var params = [];
-        if (model) params.push('model=' + encodeURIComponent(model));
-        if (key) params.push('key=' + encodeURIComponent(key));
-        if (params.length > 0) fullUrl += (fullUrl.indexOf('?') >= 0 ? '&' : '?') + params.join('&');
-
-        var args = { model_id: fullUrl };
-        if (slotName) args.slot_name = slotName;
-
-        callTool('plug_model', args);
-        closeModals();
-        mpToast('Plugging remote provider...', 'info', 2500);
-    }
-    window.doPlugProvider = doPlugProvider;
-    window._slotDrillCompare = _slotDrillCompare;
-    window._slotDrillBenchmark = _slotDrillBenchmark;
-    window._slotDrillUnplug = _slotDrillUnplug;
-
     // ── ACTIVITY FEED ──
     var PLUG_TOOLS = ['plug_model', 'hub_plug'];
     function addActivityEntry(event) {
@@ -1616,15 +1272,6 @@
         if (_activityLog.length > 500) _activityLog = _activityLog.slice(-500);
         if (event.tool === 'workflow_execute' || event.tool === 'workflow_status') {
             handleWorkflowActivity(event);
-        }
-        // Echo to slot drill-in terminal and activity feed if open
-        if (_slotDrill.active) {
-            _echoToSlotTerminal(event);
-            var targetSlot = event.args && (event.args.slot !== undefined ? event.args.slot : -1);
-            if (targetSlot === _slotDrill.slotIndex || targetSlot === -1) {
-                _slotDrillActivity.push(event);
-                _renderSlotActivityFeed();
-            }
         }
         // Append new entry to DOM without destroying expanded entries
         var feed = document.getElementById('activity-feed');
@@ -1780,7 +1427,7 @@
         var id = ++_requestId;
         _pendingTools[id] = routeAs || name;
         // Clear council output panel on new council operations for clean visual transitions
-        if (COUNCIL_TOOLS.indexOf(name) >= 0 && name !== 'list_slots') {
+        if (COUNCIL_TOOLS.indexOf(name) >= 0 && name !== 'list_slots' && name !== 'agent_chat') {
             var councilOut = document.getElementById('council-output');
             if (councilOut) councilOut.innerHTML = '<pre style="white-space:pre-wrap;color:var(--text-dim);font-size:11px;">Running ' + name + '...</pre>';
         }
@@ -2193,8 +1840,8 @@
 
     // ═══════════════ END DREAMER UI ═══════════════
 
-    var MEMORY_TOOLS = ['bag_catalog', 'bag_search', 'bag_get', 'bag_export', 'bag_induct', 'bag_forget', 'bag_put', 'pocket', 'summon', 'materialize', 'get_cached'];
-    var COUNCIL_TOOLS = ['council_status', 'all_slots', 'broadcast', 'council_broadcast', 'set_consensus', 'debate', 'chain', 'slot_info', 'get_slot_params', 'invoke_slot', 'plug_model', 'unplug_slot', 'clone_slot', 'mu' + 'tate_slot', 'rename_slot', 'swap_slots', 'hub_plug', 'cu' + 'll_slot'];
+    var MEMORY_TOOLS = ['bag_catalog', 'bag_search', 'bag_get', 'bag_export', 'bag_induct', 'bag_forget', 'bag_put', 'pocket', 'summon', 'materialize', 'bag_read_doc', 'bag_list_docs', 'bag_search_docs', 'bag_tree', 'bag_checkpoint', 'bag_versions', 'bag_diff', 'bag_restore', 'get_cached'];
+    var COUNCIL_TOOLS = ['council_status', 'all_slots', 'broadcast', 'council_broadcast', 'set_consensus', 'debate', 'chain', 'slot_info', 'get_slot_params', 'invoke_slot', 'plug_model', 'unplug_slot', 'clone_slot', 'mu' + 'tate_slot', 'rename_slot', 'swap_slots', 'hub_plug', 'cu' + 'll_slot', 'agent_chat'];
     var WORKFLOW_TOOLS = ['workflow_list', 'workflow_get', 'workflow_execute', 'workflow_status'];
 
     function parseToolData(data) {
@@ -3543,6 +3190,63 @@
             return;
         }
 
+        // Agent chat drill-down responses — route to chat overlay
+        if (toolName === 'agent_chat' || toolName === '__agent_chat__') {
+            _setAchatBusy(false);
+            if (msg.error) {
+                _clearEmptyState();
+                var errDiv = document.createElement('div');
+                errDiv.className = 'achat-msg error';
+                errDiv.textContent = msg.error;
+                var mc = document.getElementById('achat-messages');
+                if (mc) { mc.appendChild(errDiv); mc.scrollTop = mc.scrollHeight; }
+                return;
+            }
+            try {
+                var raw = parseToolData(msg.data);
+                var resp = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                if (resp.session_id) {
+                    _achatSessionId = resp.session_id;
+                    var sidEl = document.getElementById('achat-session-id');
+                    if (sidEl) sidEl.textContent = resp.session_id;
+                }
+                // Update toolbar meta from response
+                if (resp.blocked_tools) {
+                    var blockedEl = document.getElementById('achat-blocked-count');
+                    if (blockedEl) blockedEl.textContent = resp.blocked_tools.length;
+                }
+                if (resp.turn_count !== undefined) {
+                    var sessionLabel = document.getElementById('achat-session-id');
+                    if (sessionLabel && resp.session_id) {
+                        sessionLabel.textContent = resp.session_id + ' (' + resp.turn_count + ' turns)';
+                    }
+                }
+                // Show elapsed time as system message
+                var elapsed = _achatSendTime ? Math.round((Date.now() - _achatSendTime) / 1000) : 0;
+                var iterations = (resp.result && resp.result.iterations) || 0;
+
+                var resultObj = resp.result || {};
+                if (resultObj.error) {
+                    _appendAchatMsg('error', resultObj.error, Date.now());
+                    return;
+                }
+                var toolCalls = resultObj.tool_calls || [];
+                if (toolCalls.length) _appendAchatToolTrace(toolCalls);
+                var answer = resultObj.final_answer || '';
+                if (answer) {
+                    _appendAchatMsg('assistant', answer, Date.now());
+                } else if (!toolCalls.length) {
+                    _appendAchatMsg('error', 'No response received. Make sure this slot has a text-generation model plugged in.', Date.now());
+                }
+                if (elapsed > 0 || iterations > 0) {
+                    _appendAchatMsg('system-info', iterations + ' iteration' + (iterations !== 1 ? 's' : '') + ' · ' + elapsed + 's · ' + toolCalls.length + ' tool call' + (toolCalls.length !== 1 ? 's' : ''), null);
+                }
+            } catch (e) {
+                _appendAchatMsg('assistant', parseToolData(msg.data), Date.now());
+            }
+            return;
+        }
+
         var text = msg.error ? 'ERROR: ' + msg.error : parseToolData(msg.data);
 
         if (WORKFLOW_TOOLS.indexOf(toolName) >= 0) {
@@ -3570,7 +3274,7 @@
             if (!memList) return;
 
             // Refresh catalog after successful memory mutations.
-            if (!msg.error && ['bag_put', 'bag_induct', 'bag_forget', 'pocket', 'load_bag'].indexOf(toolName) >= 0) {
+            if (!msg.error && ['bag_put', 'bag_induct', 'bag_forget', 'pocket', 'load_bag', 'bag_checkpoint', 'bag_restore'].indexOf(toolName) >= 0) {
                 callTool('bag_catalog', {});
             }
 
@@ -7156,6 +6860,185 @@
         }
     }
 
+    // ═══════════════ AGENT CHAT DRILL-DOWN ═══════════════
+    var _achatSlot = null;
+    var _achatSessionId = '';
+    var _achatBusy = false;
+    var _achatSendTime = 0;
+    var _achatElapsedTimer = null;
+
+    function openAgentChat(slot) {
+        _achatSlot = slot;
+        _achatSessionId = '';
+        var tab = document.getElementById('tab-council');
+        if (!tab) return;
+        tab.classList.add('chat-active');
+
+        var slotInfo = (_lastSlotsArr && _lastSlotsArr[slot]) ? _lastSlotsArr[slot] : {};
+        var isPlugged = slotInfo.plugged === true || !!slotInfo.model_source;
+        var modelRaw = slotInfo.model_source || slotInfo.model_id || slotInfo.name || 'SLOT ' + slot;
+        var modelLabel = _friendlyModelName(modelRaw) || modelRaw;
+        var modelType = slotInfo.model_type || slotInfo.type || 'unknown';
+
+        document.getElementById('achat-title').textContent = 'SLOT ' + slot + ' \u2014 ' + (isPlugged ? modelLabel : 'EMPTY');
+        document.getElementById('achat-session-id').textContent = '';
+        document.getElementById('achat-model-name').textContent = isPlugged ? modelLabel : 'No model plugged';
+
+        var typeClass = 'type-llm';
+        if (modelType.indexOf('EMBED') >= 0) typeClass = 'type-embed';
+        else if (modelType.indexOf('CLASS') >= 0) typeClass = 'type-class';
+        else if (modelType.indexOf('RERANK') >= 0) typeClass = 'type-rerank';
+        var metaEl = document.getElementById('achat-model-meta');
+        if (isPlugged) {
+            metaEl.innerHTML = '<span class="achat-tag ' + typeClass + '">' + escHtml(modelType) + '</span>' +
+                '<span class="achat-tag">SLOT ' + slot + '</span>';
+        } else {
+            metaEl.innerHTML = '<span class="achat-tag" style="background:#7f1d1d;color:#fca5a5;">EMPTY SLOT</span>' +
+                '<span class="achat-tag">SLOT ' + slot + '</span>';
+        }
+
+        var hubMeta = _slotHubInfoCache[slotInfo.model_source || slotInfo.model_id];
+        if (hubMeta) {
+            if (hubMeta.task) metaEl.innerHTML += '<span class="achat-tag">' + escHtml(hubMeta.task) + '</span>';
+            if (hubMeta.size_mb) metaEl.innerHTML += '<span class="achat-tag">' + hubMeta.size_mb.toFixed(0) + ' MB</span>';
+        }
+
+        document.getElementById('achat-tool-count').textContent = 'default set (~30)';
+        document.getElementById('achat-blocked-count').textContent = '10';
+
+        if (!isPlugged) {
+            document.getElementById('achat-messages').innerHTML =
+                '<div class="achat-msg error" style="padding:16px;text-align:center;">' +
+                'This slot is empty. Plug a model first using the HuggingFace Hub or plug_model tool.' +
+                '<br/><br/><span style="color:var(--text-dim);font-size:11px;">Example: plug_model(model_id="Qwen/Qwen2.5-1.5B-Instruct")</span></div>';
+            _setAchatBusy(true);
+        } else {
+            document.getElementById('achat-messages').innerHTML =
+                '<div class="achat-empty">Send a message to start a conversation.<br/>The agent can use tools autonomously.' +
+                '<br/><span style="color:var(--text-dim);font-size:11px;margin-top:6px;display:inline-block;">CPU inference may take 1-5 minutes per iteration for &gt;1B models.</span></div>';
+            _setAchatBusy(false);
+        }
+        document.getElementById('achat-input').value = '';
+        setTimeout(function () { document.getElementById('achat-input').focus(); }, 100);
+    }
+    window.openAgentChat = openAgentChat;
+
+    function closeAgentChat() {
+        var tab = document.getElementById('tab-council');
+        if (tab) tab.classList.remove('chat-active');
+        _achatSlot = null;
+        _stopElapsedTimer();
+    }
+    window.closeAgentChat = closeAgentChat;
+
+    function resetAgentChat() {
+        if (_achatSlot === null) return;
+        if (_achatSessionId) {
+            callTool('agent_chat', { slot: _achatSlot, message: '(reset)', session_id: _achatSessionId, reset: true });
+        }
+        _achatSessionId = '';
+        document.getElementById('achat-session-id').textContent = '';
+        document.getElementById('achat-messages').innerHTML =
+            '<div class="achat-msg system-info">Session reset. Start a new conversation.</div>' +
+            '<div class="achat-empty">Send a message to start a conversation.<br/>The agent can use tools autonomously.</div>';
+        _setAchatBusy(false);
+    }
+    window.resetAgentChat = resetAgentChat;
+
+    function _setAchatBusy(busy) {
+        _achatBusy = busy;
+        var btn = document.getElementById('achat-send-btn');
+        var thinking = document.getElementById('achat-thinking');
+        if (btn) btn.disabled = busy;
+        if (thinking) thinking.classList.toggle('active', busy);
+        if (busy) {
+            _achatSendTime = Date.now();
+            _startElapsedTimer();
+        } else {
+            _stopElapsedTimer();
+        }
+    }
+
+    function _startElapsedTimer() {
+        _stopElapsedTimer();
+        var el = document.getElementById('achat-elapsed');
+        _achatElapsedTimer = setInterval(function () {
+            if (el) {
+                var secs = Math.round((Date.now() - _achatSendTime) / 1000);
+                el.textContent = secs + 's';
+            }
+        }, 500);
+    }
+    function _stopElapsedTimer() {
+        if (_achatElapsedTimer) { clearInterval(_achatElapsedTimer); _achatElapsedTimer = null; }
+    }
+
+    function _clearEmptyState() {
+        var container = document.getElementById('achat-messages');
+        if (!container) return;
+        var empty = container.querySelector('.achat-empty');
+        if (empty) empty.remove();
+    }
+
+    function _appendAchatMsg(role, content, ts) {
+        _clearEmptyState();
+        var container = document.getElementById('achat-messages');
+        if (!container) return;
+        var div = document.createElement('div');
+        div.className = 'achat-msg ' + role;
+        var tsStr = ts ? new Date(ts).toLocaleTimeString() : '';
+        div.innerHTML = escHtml(content) + (tsStr ? '<span class="achat-ts">' + tsStr + '</span>' : '');
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function _appendAchatToolTrace(toolCalls) {
+        if (!toolCalls || !toolCalls.length) return;
+        _clearEmptyState();
+        var container = document.getElementById('achat-messages');
+        if (!container) return;
+        var div = document.createElement('div');
+        div.className = 'achat-msg tool-trace';
+        var headerHtml = '<div class="trace-header">Tool calls (' + toolCalls.length + ')</div>';
+        var linesHtml = toolCalls.map(function (tc) {
+            var name = tc.tool || tc.name || '?';
+            var isErr = !!tc.error;
+            var preview = '';
+            if (tc.result) {
+                preview = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result);
+                if (preview.length > 200) preview = preview.substring(0, 200) + '...';
+            }
+            if (tc.error) preview = String(tc.error);
+            return '<div class="trace-line">' +
+                '<span class="trace-tool-name">' + escHtml(name) + '</span> ' +
+                '<span class="' + (isErr ? 'trace-status-err' : 'trace-status-ok') + '">' + (isErr ? 'ERR' : 'OK') + '</span>' +
+                (preview ? ' <span class="trace-preview">' + escHtml(preview) + '</span>' : '') +
+                '</div>';
+        }).join('');
+        div.innerHTML = headerHtml + linesHtml;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function sendAgentChat() {
+        if (_achatBusy || _achatSlot === null) return;
+        var input = document.getElementById('achat-input');
+        var msg = (input.value || '').trim();
+        if (!msg) return;
+        input.value = '';
+        _appendAchatMsg('user', msg, Date.now());
+        _setAchatBusy(true);
+        _achatSendTime = Date.now();
+
+        var maxIter = parseInt(document.getElementById('achat-max-iter').value) || 5;
+        var maxTok = parseInt(document.getElementById('achat-max-tokens')?.value) || 256;
+        var args = { slot: _achatSlot, message: msg, max_iterations: maxIter, max_tokens: maxTok };
+        if (_achatSessionId) args.session_id = _achatSessionId;
+
+        callTool('agent_chat', args, '__agent_chat__');
+    }
+    window.sendAgentChat = sendAgentChat;
+
     // ── INIT ──
     buildToolsRegistry();
     renderSlots([]);
@@ -7164,10 +7047,6 @@
     renderWorkflowNodeStates(null, null);
     _wfRenderDrillDetail();
     _wfSetBadge('idle', 'IDLE');
-
-    // ── SLOT DRILL-IN BACK BUTTON ──
-    var drillBackBtn = document.getElementById('slot-drill-back');
-    if (drillBackBtn) drillBackBtn.addEventListener('click', function () { closeSlotDrill(); });
 
     // Tell extension we're ready
     vscode.postMessage({ command: 'ready' });
