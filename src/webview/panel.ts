@@ -4994,6 +4994,7 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         <div class="slots-grid" id="slots-grid"></div>
         <div class="council-controls">
             <button onclick="openPlugModal()">PLUG MODEL</button>
+            <button onclick="openPlugProviderModal()">PLUG PROVIDER</button>
             <button onclick="callTool('list_slots',{})">REFRESH SLOTS</button>
             <button onclick="callTool('council_status',{})">CONSENSUS STATUS</button>
             <button class="btn-dim" onclick="callTool('all_slots',{})">INVOKE ALL</button>
@@ -6222,6 +6223,40 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
         </div>
         <div class="modal-actions">
             <button onclick="doPlug()">PLUG</button>
+            <button class="btn-dim" onclick="closeModals()">CANCEL</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ PLUG PROVIDER MODAL ═══════════════ -->
+<div class="modal-overlay" id="plug-provider-modal">
+    <div class="modal" style="width:540px;">
+        <div class="modal-title">PLUG REMOTE PROVIDER</div>
+        <div style="font-size:10px;color:var(--text-dim);margin-bottom:12px;line-height:1.5;">
+            Connect any OpenAI-compatible API endpoint as a council slot.
+            Supports <strong>OpenAI</strong>, <strong>Anthropic</strong>, <strong>Ollama</strong>,
+            <strong>vLLM</strong>, <strong>LM Studio</strong>, or any server exposing <code>/v1/chat/completions</code>.
+        </div>
+        <div class="field">
+            <label>Provider URL <span style="color:var(--red);">*</span></label>
+            <input id="plug-provider-url" placeholder="http://localhost:11434/v1  or  https://api.openai.com/v1" />
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="field">
+                <label>API Key <span style="color:var(--text-dim);">(optional)</span></label>
+                <input id="plug-provider-key" type="password" placeholder="sk-..." />
+            </div>
+            <div class="field">
+                <label>Model Name <span style="color:var(--text-dim);">(auto-detect if blank)</span></label>
+                <input id="plug-provider-model" placeholder="gpt-4o, claude-3-opus, etc." />
+            </div>
+        </div>
+        <div class="field">
+            <label>Slot Name <span style="color:var(--text-dim);">(optional)</span></label>
+            <input id="plug-provider-slot-name" placeholder="my-provider" />
+        </div>
+        <div class="modal-actions">
+            <button onclick="doPlugProvider()">CONNECT</button>
             <button class="btn-dim" onclick="closeModals()">CANCEL</button>
         </div>
     </div>

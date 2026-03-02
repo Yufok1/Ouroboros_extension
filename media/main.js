@@ -2709,6 +2709,12 @@
     }
     window.drillMemItem = drillMemItem;
 
+    function closeMemDetail() {
+        var detail = document.getElementById('mem-detail');
+        if (detail) detail.style.display = 'none';
+    }
+    window.closeMemDetail = closeMemDetail;
+
     var _commitConfirmTimer = null;
     function commitBagVersion(btn) {
         var key = btn.getAttribute('data-bag-key');
@@ -3663,6 +3669,34 @@
         closeModals();
     }
     window.doPlug = doPlug;
+
+    // ── PLUG PROVIDER MODAL ──
+    function openPlugProviderModal() {
+        var modal = document.getElementById('plug-provider-modal');
+        if (modal) modal.classList.add('active');
+    }
+    window.openPlugProviderModal = openPlugProviderModal;
+
+    function doPlugProvider() {
+        var url = (document.getElementById('plug-provider-url') || {}).value || '';
+        var key = (document.getElementById('plug-provider-key') || {}).value || '';
+        var model = (document.getElementById('plug-provider-model') || {}).value || '';
+        var slotName = (document.getElementById('plug-provider-slot-name') || {}).value || '';
+        if (!url) return;
+
+        var fullUrl = url;
+        var params = [];
+        if (model) params.push('model=' + encodeURIComponent(model));
+        if (key) params.push('key=' + encodeURIComponent(key));
+        if (params.length > 0) fullUrl += (fullUrl.indexOf('?') >= 0 ? '&' : '?') + params.join('&');
+
+        var args = { model_id: fullUrl };
+        if (slotName) args.slot_name = slotName;
+
+        callTool('plug_model', args);
+        closeModals();
+    }
+    window.doPlugProvider = doPlugProvider;
 
     function doInduct() {
         var key = document.getElementById('induct-key').value;
