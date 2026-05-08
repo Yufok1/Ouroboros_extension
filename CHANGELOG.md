@@ -2,6 +2,31 @@
 
 All notable changes to the "Champion Council" extension will be documented in this file.
 
+## [0.9.8] - 2026-05-08
+
+### File Operations Tool Surface + 3D Council Visualization
+
+Post-0.9.7 work consolidated for marketplace publish. Adds full FelixBag-sandboxed file operations and three.js-powered 3D rendering substrate to the Council webview.
+
+**File Operations (16 new tools, Memory category)**
+- `file_read`, `file_write`, `file_edit`, `file_append`, `file_prepend` — sandboxed read/write/edit primitives within FelixBag scope.
+- `file_delete`, `file_rename`, `file_copy` — controlled mutation operations.
+- `file_list`, `file_tree`, `file_search`, `file_info` — discovery.
+- `file_checkpoint`, `file_versions`, `file_diff`, `file_restore` — git-like versioning, mirroring the bag-doc pattern.
+- All file_* tools pluggable into agent chat via the same granted-tools mechanism as bag_*.
+
+**3D Council Visualization (webview)**
+- Integrated `three.min.js`, `OrbitControls.js`, `CSS2DRenderer.js` into the Council webview.
+- Extended `buildHTML` signature to thread the new resource URIs through the panel renderer.
+- Substrate ready for spatial council visualization; renders cleanly through VS Code webview CSP.
+
+**Capsule Refresh**
+- Recompiled `champion_gen8.py` (new quine hash `c8c137dc54a39d9ecc841c9f0332f800`, generation 8, fitness 0.6069858).
+- `resources/capsule.gz` regenerated to match.
+
+**Brotology Doctrine Anchor**
+- This release ships under the brotology field ops manual (filed 2026-05-08): evil-within doctrine, opt-in defaults, capture-off-by-default, provenance as safety substrate. No telemetry added; capture-shape stays in review-tool lane.
+
 ## [0.9.7] - 2026-03-01
 
 ### Agentic Drill-Down, FelixBag Versioning & Web Search — 156 Tools

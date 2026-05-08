@@ -142,6 +142,9 @@ export class CouncilPanel {
         const mediaPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js');
         const svgPanZoomPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'svg-pan-zoom.min.js');
         const peerjsPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'peerjs.min.js');
+        const threePath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'three.min.js');
+        const orbitControlsPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'OrbitControls.js');
+        const css2DRendererPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'CSS2DRenderer.js');
 
         this.panel = vscode.window.createWebviewPanel(
             'championCouncil', 'Champion Council', vscode.ViewColumn.One,
@@ -156,7 +159,10 @@ export class CouncilPanel {
         const scriptUri = this.panel.webview.asWebviewUri(mediaPath);
         const svgPanZoomUri = this.panel.webview.asWebviewUri(svgPanZoomPath);
         const peerjsUri = this.panel.webview.asWebviewUri(peerjsPath);
-        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource);
+        const threeUri = this.panel.webview.asWebviewUri(threePath);
+        const orbitControlsUri = this.panel.webview.asWebviewUri(orbitControlsPath);
+        const css2DRendererUri = this.panel.webview.asWebviewUri(css2DRendererPath);
+        this.panel.webview.html = this.buildHTML(scriptUri, svgPanZoomUri, peerjsUri, this.panel.webview.cspSource, threeUri, orbitControlsUri, css2DRendererUri);
 
         this.panel.webview.onDidReceiveMessage(
             (msg) => {
@@ -2621,7 +2627,7 @@ export class CouncilPanel {
     // HTML Generation - Operations Facility UI
     // ═══════════════════════════════════════════════════════════════
 
-    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string): string {
+    private buildHTML(scriptUri: vscode.Uri, svgPanZoomUri: vscode.Uri, peerjsUri?: vscode.Uri, cspSource?: string, threeUri?: vscode.Uri, orbitControlsUri?: vscode.Uri, css2DRendererUri?: vscode.Uri): string {
         const toolRegistryJSON = JSON.stringify(TOOL_CATEGORIES);
 
         return `<!DOCTYPE html>
@@ -6287,6 +6293,9 @@ input:focus, select:focus { border-color: var(--accent); outline: none; }
 <script>window.__CATEGORIES__ = ${toolRegistryJSON};</script>
 <script src="${svgPanZoomUri}"></script>
 ${peerjsUri ? `<script src="${peerjsUri}"></script>` : ''}
+${threeUri ? `<script src="${threeUri}"></script>` : ''}
+${orbitControlsUri ? `<script src="${orbitControlsUri}"></script>` : ''}
+${css2DRendererUri ? `<script src="${css2DRendererUri}"></script>` : ''}
 <script src="${scriptUri}"></script>
 <script>
 (function(){

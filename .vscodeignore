@@ -111,3 +111,20 @@ Champion_Council/**
 media/*.m4a
 media/*.mp4
 .relay_center.cmd
+
+# Operator working data (never ship to marketplace)
+children/**
+tmp/**
+docuuument.txt
+
+# Internal sitreps from 0.9.7→0.9.8 cycle (not marketplace material)
+ACCLIMATION_TO_CURRENT_FIX_FOCUS_*.md
+AGENT_ORCHESTRATION_DIAGNOSIS.md
+COUNCIL_DRILL_DOWN_SPEC.md
+FILEOPS_FILE_NAMESPACE_INTEGRATION_MAP.md
+FILEOPS_IMPLEMENTATION_BRIEF.md
+FRONTEND_ALIGNMENT_PLAN.md
+HF_AGENTIC_CHAT_ANALYSIS.md
+INTEGRATION_CHALLENGE_ANALYSIS.md
+NEXT_AGENT_FILEOPS_AND_MCP_SITREP_*.md
+VSCODE_PACKAGE_UPDATES.md

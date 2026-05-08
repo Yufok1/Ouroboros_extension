@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as zlib from 'zlib';
 import * as os from 'os';
 
-// Tool category → tool name mapping (156 tools across 21 categories)
+// Tool category → tool name mapping (expanded toolset across categories)
 export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] }> = {
     'Core Inference': {
         setting: 'coreInference',
@@ -35,7 +35,10 @@ export const TOOL_CATEGORIES: Record<string, { setting: string; tools: string[] 
             'bag_induct', 'bag_forget', 'bag_export',
             'pocket', 'summon', 'materialize', 'load_bag', 'save_bag',
             'bag_read_doc', 'bag_list_docs', 'bag_search_docs', 'bag_tree',
-            'bag_checkpoint', 'bag_versions', 'bag_diff', 'bag_restore'
+            'bag_checkpoint', 'bag_versions', 'bag_diff', 'bag_restore',
+            'file_read', 'file_write', 'file_edit', 'file_append', 'file_prepend',
+            'file_delete', 'file_rename', 'file_copy', 'file_list', 'file_tree',
+            'file_search', 'file_info', 'file_checkpoint', 'file_versions', 'file_diff', 'file_restore'
         ]
     },
     'HuggingFace Hub': {
